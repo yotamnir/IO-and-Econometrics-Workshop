@@ -1,0 +1,111 @@
+---
+title: "Assignment 1 – IV Models"
+output:
+  html_document:
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Background and data access
+
+The following section downloads and imports the NLS data file from <https://davidcard.berkeley.edu/data_sets.html> (accessed 25.03.2021), and renames the variables that are relevant for the following sections, in accordance with the codebook corresponding to the data.
+
+```{r Part 1, results='hide', message=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, AER)
+temp <- tempfile()
+download.file("https://davidcard.berkeley.edu/data_sets/proximity.zip",temp)
+NLS <- read.table(unz(temp, 'nls.dat'), na.strings = ".") %>%
+  rename(lwage76 = V29,
+         ed76 = V6,
+         age76 = V8,
+         KWW = V47,
+         IQ = V48,
+         daded = V9,
+         momed = V11,
+         sinmom14 = V15,
+         nearc2 = V2,
+         nearc4 = V3,
+         black = V32,
+         smsa76 = V33,
+         south76 = V35,
+         reg661 = V17,
+         reg662 = V18,
+         reg663 = V19,
+         reg664 = V20,
+         reg665 = V21,
+         reg666 = V22,
+         reg667 = V23,
+         reg668 = V24,
+         weight = V13) %>%
+  mutate(exper = age76 - ed76 - 6,  # adding a proxy for experience (number of years not studying after age 6)
+         exper2 = exper^2/100) %>%  # experience squared, following Card in dividing by 100
+  filter(!is.na(lwage76))           # removing observations with missing data on outcome
+rm(temp)
+```
+
+## 2. Returns to schooling: point-identified linear models
+
+The following linear regression model is largely similar to Card's fourth specification in Table 4, minus a few controls and with the addition of two variables aiming to minimize the "ability bias" of OLS. It can be used to attempt estimate the effect of education (in particular, the number of years of schooling in 1976) on log wages in 1976:
+
+$log(wages76_i) = \alpha_r + \beta educ76_i + \gamma X_i$
+
+where $\alpha_r$ is a vector of controls for region of residence in 1966 and $X_i$ is a vector of control variables that includes the following:
+
+* IQ and knowledge of the world of work scores, serving as proxies for "ability" (the latter score does not seem to be a good indicator of intelligence, but it may be a good proxy for motivation, since it is reasonable to assume that individuals with a higher KWW score take more interest in the world of work).
+* Experience and experience squared, to capture the diminishing returns to experience as is customary in Mincer equations.
+* Mother's years of schooling and father's years of schooling, living with a single mother at age 14, as background controls which may affect both years of schooling and worker qualities.
+* Ethnicity (whether black) as an additional control for background and for potential labor market discrimination.
+* Current residence in the south or in a metropolitan area (SMSA) to control for labor market characteristics.
+
+The following code estimates the above equation in OLS (weighted according to NLS weights):
+
+```{r OLS}
+OLS <- lm(lwage76 ~ ed76 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black +smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668, NLS, weights = weight)
+summary(OLS)
+```
+
+The effect of around 0.059 per year obtained here is lower than that found by Card (in the range of 0.073 - 0.075). It is likely that the IQ and KWW controls are responsible for this change from Card's otherwise stable result, since ability bias can be expected to bias OLS estimates upward (due to its positive correlation with both schooling and earnings).
+
+In order to overcome ability bias (as well as measurement error bias, which tends to bias estimates toward zero), we could use an instrumental variable that is correlated with schooling choices, but which we can reasonably believe is uncorrelated with the source of bias – i.e. with ability (and the measurement error, although this is less challenging, even if worthy of attention).
+
+None of the variables available in the NLS data set seem as plausibly exogenous as Card's choice of proximity to a four-year college while growing up. Card shows that it is correlated with schooling, and the t-statistic on *nearc4* in the first-stage regression presented below indicates a sufficient correlation with years of schooling.
+
+```{r Relevance Condition}
+first_stage <- lm(ed76 ~ nearc4 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black +smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668, NLS)
+summary(first_stage)
+```
+
+Such an IV estimation is carried out below:
+
+```{r IV}
+IV <- ivreg(lwage76 ~ ed76 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black +smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668 | .+ nearc4 -ed76, data = NLS, weights = weight)
+summary(IV)
+```
+
+We have obtained a coefficient on the effect of a year of schooling that is higher than that obtained by OLS, similarly to Card.
+
+A potential shortcoming of this model is that growing up near a four-year college might not be exogenous to the model. This would be the case if, for example, the control variables do not fully account for possible influences of greater exposure of children to academics (or family members of academics) in the community.
+
+
+## 3. Returns to schooling: set-identification
+
+As mentioned above, it is not unlikely that the college proximity instrument fails to satisfy the exclusion restriction. It might, however, be more plausible to argue that wages conditional on any level of education are affected non-negatively, in expectation, by growing up near a four-year college. Spillovers such as those suggested above, or increased economic activity associated with the presence of a college, support such an assumption. This monotone IV assumption allows us to estimate bounds on the average treatment effect of the variable for which we are instrumenting. We can then narrow these bounds by adding a monotone treatment selection (MTS) assumption. The MTS implies that those in the higher educated group would in expectation have higher wages even if both groups had obtained exactly the same level of education (unconditional on the particular level). The ability bias discussed above does indeed support such an assumption.
+
+To this end, I replace the continuous years of schooling variable with a binary variable, due to my unfamiliarity with any continuous equivalent of an ATE in this context. The variable used here is post-high school education, which receives a value of 1 for individuals with $ed76 > 12$, and 0 otherwise. I prefer this choice for two reasons. The first is with respect to lower cutoffs: growing up near a college is likely to be most influential on years of schooling particularly through its effect on college attendance (although it could potentially also affect other schooling outcomes through a spillover to school quality). The second, which is perhaps more debatable is with respect to the definition of the college treatment: the available data does not allow me to accurately identify college graduates, and also there is value in observing individuals who have enjoyed some higher education even if they did not receive a diploma.
+
+The absolute bounds I use in the estimation (i.e. $K_0$ and $K_1$) are the minimal and maximal sample values of $lwage76$. It is of course possible to have lower and higher wages than this, but the assumption that the conditional expectations will be within these bounds seems like a very safe corner to cut in this case.
+
+
+```{r MIV function}
+
+
+
+```
+
+
+
+
