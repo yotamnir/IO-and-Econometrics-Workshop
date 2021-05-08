@@ -1,12 +1,12 @@
-NLS1 <- NLS %>%
-  filter(!between(ed76, 13, 15))
+#NLS1 <- NLS %>%
+#  filter(!between(ed76, 13, 15))
 
-K0 <- min(NLS1$lwage76)  # absolute lower bound
-K1 <- max(NLS1$lwage76)  # absolute upper bound
+K0 <- min(NLS$lwage76)  # absolute lower bound
+K1 <- max(NLS$lwage76)  # absolute upper bound
 
-z <- (NLS1$ed76 > 12)    # treatment: 1 if above 12 years of schooling, 0 otherwise
-y <- NLS1$lwage76        # outcome: unchanged
-v <- NLS1$nearc4         # IV: unchanged for now
+z <- (NLS$ed76 > 12)    # treatment: 1 if above 12 years of schooling, 0 otherwise
+y <- NLS$lwage76        # outcome: unchanged
+v <- NLS$nearc4         # IV: unchanged for now
 
 Ey_z1 <- mean(y[z==1])  # sample analogue for E[y|z=1]
 Ey_z0 <- mean(y[z==0])  # sample analogue for E[y|z=0]
@@ -136,6 +136,10 @@ B1_v1MTS - b0_v1MTS
 
 
 
-# Additional check not relevant to the above workflow
+
+
+# Additional checks not relevant to the above workflow
 ggplot(data = NLS %>% group_by(ed76) %>% summarise(mean = mean(V39))) +
   geom_point(mapping = aes(ed76, mean))
+
+

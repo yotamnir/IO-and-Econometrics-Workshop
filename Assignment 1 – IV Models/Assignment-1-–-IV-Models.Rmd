@@ -1,7 +1,12 @@
 ---
 title: "Assignment 1 – IV Models"
+author: 'Yotam Nir'
+date: "08/05/2021"
 output:
   html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
     code_folding: show
 ---
 
@@ -93,19 +98,172 @@ A potential shortcoming of this model is that growing up near a four-year colleg
 
 ## 3. Returns to schooling: set-identification
 
+#### Motivation
+
 As mentioned above, it is not unlikely that the college proximity instrument fails to satisfy the exclusion restriction. It might, however, be more plausible to argue that wages conditional on any level of education are affected non-negatively, in expectation, by growing up near a four-year college. Spillovers such as those suggested above, or increased economic activity associated with the presence of a college, support such an assumption. This monotone IV assumption allows us to estimate bounds on the average treatment effect of the variable for which we are instrumenting. We can then narrow these bounds by adding a monotone treatment selection (MTS) assumption. The MTS implies that those in the higher educated group would in expectation have higher wages even if both groups had obtained exactly the same level of education (unconditional on the particular level). The ability bias discussed above does indeed support such an assumption.
 
 To this end, I replace the continuous years of schooling variable with a binary variable, due to my unfamiliarity with any continuous equivalent of an ATE in this context. The variable used here is post-high school education, which receives a value of 1 for individuals with $ed76 > 12$, and 0 otherwise. I prefer this choice for two reasons. The first is with respect to lower cutoffs: growing up near a college is likely to be most influential on years of schooling particularly through its effect on college attendance (although it could potentially also affect other schooling outcomes through a spillover to school quality). The second, which is perhaps more debatable is with respect to the definition of the college treatment: the available data does not allow me to accurately identify college graduates, and also there is value in observing individuals who have enjoyed some higher education even if they did not receive a diploma.
 
+#### MIV
+
 The absolute bounds I use in the estimation (i.e. $K_0$ and $K_1$) are the minimal and maximal sample values of $lwage76$. It is of course possible to have lower and higher wages than this, but the assumption that the conditional expectations will be within these bounds seems like a very safe corner to cut in this case.
 
+The following code creates a function that estimates MIV bounds, allowing also for non-binary instruments.
 
-```{r MIV function}
-
-
-
+```{r MIV function, results='hide', message=FALSE}
+miv <- function(y, z, v, K0, K1){
+  
+  # Storing conditional probabilities of z (and their complements) given v
+  P1 <- as.data.frame(cbind(z,v)) %>%
+    group_by(v) %>%
+    summarize(
+      P = mean(z)
+    ) %>%
+    mutate(z = 1)
+  P0 <- as.data.frame(cbind(z,v)) %>%
+    group_by(v) %>%
+    summarize(
+      P = 1 - mean(z)
+    ) %>%
+    mutate(z = 0)
+  P <- rbind(P0, P1)
+  
+  # Adding conditional means given z and v
+  df <- as.data.frame(cbind(z,v,y)) %>%
+    group_by(z,v) %>%
+    summarize(
+      E = mean(y)
+    )
+  df <- left_join(P, df)
+  df[is.na(df)] = 0     # for cases in which for some v there is no variance. Value doesn't matter as it is multiplied by probability 0
+  
+  # Generating bounds (conditional on v, as a first step) for each combination:
+  df <- df %>%
+    mutate(
+      LB = E * P + K0 * (1-P),
+      UB = E * P + K1 * (1-P)
+    )
+  
+  # Estimating bounds for each level of u
+  minUB <- NULL   # to be filled as a vector in the loop
+  maxLB <- NULL   # to be filled as a vector in the loop
+  Pv <- NULL      # will be filled by P(v = u)
+  for (t in 0:1){
+    for (u in sort(unique(v))){
+      x <- df %>%
+        filter(v >= u & z == t) %>%
+        summarize(minUB = min(UB)) %>%
+        as.numeric()
+      minUB <- c(minUB, x)  # minimal UB s.t. z = t and v >= u
+      x <- df %>%
+        filter(v <= u & z == t) %>%
+        summarize(maxLB = max(LB)) %>%
+        as.numeric()
+      maxLB <- c(maxLB, x)  # maximal UB s.t. z = t and v <= u
+      Pv <- c(Pv, mean(v == u))
+    }
+  }
+  
+  df <- cbind(df, maxLB, minUB, Pv)   # adding the vectors to the data frame
+  
+  b1_v <- df %>%          # maximal lower bound s.t. z = 1 and u >= u1
+    filter(z == 1) %>%
+    select(maxLB)
+  B0_v <- df %>%          # minimal upper bound s.t. z = 0 and u <= u2
+    filter(z == 0) %>%
+    select(minUB)
+  b0_v <- df %>%          # maximal lower bound s.t. z = 0 and u >= u1
+    filter(z == 0) %>%
+    select(maxLB)
+  B1_v <- df %>%          # minimal upper bound s.t. z = 1 and u <= u2
+    filter(z == 1) %>%
+    select(minUB)
+  Pv <- df %>%            # probability of v = u
+    filter(z == 0) %>%
+    select(Pv)
+  
+  # Return MIV lower and upper bounds:
+  return(c(sum((b1_v - B0_v) * Pv), sum((B1_v - b0_v) * Pv)))
+}
 ```
 
+Now we can estimate the MIV bounds using our function:
+
+```{r MIV bounds nearc4, message=FALSE}
+miv(
+  y  = NLS$lwage76,
+  z  = (NLS$ed76 > 12),
+  v  = NLS$nearc4,
+  K0 = min(NLS$lwage76),
+  K1 = max(NLS$lwage76)
+)
+```
+
+The bounds are extremely wide, extending well above and well below the regression estimates obtained in the previous sections, and it is hard to imagine a policy question for which they would be informative. Trying other plausibly monotone instruments, such as parents' years of schooling, produces a perhaps more informative upper bound.
+
+```{r MIV bounds parents education, message=FALSE}
+miv(
+  y  = NLS$lwage76,
+  z  = (NLS$ed76 > 12),
+  v  = NLS$momed,
+  K0 = min(NLS$lwage76),
+  K1 = max(NLS$lwage76)
+)
+miv(
+  y  = NLS$lwage76,
+  z  = (NLS$ed76 > 12),
+  v  = NLS$daded,
+  K0 = min(NLS$lwage76),
+  K1 = max(NLS$lwage76)
+)
+```
+
+If we accept the validity of these MIVs, we can conclude on the basis of relatively few assumptions that going to college (an admittedly ambiguous treatment, though informative nonetheless) improves earnings by no more than 50 percent.
+
+#### MTS
+
+We now add the MTS assumption, as discussed above. I have written the process explicitly for our particular question, rather than creating a function, as I am not certain that I have applied the method correctly and would like to easily identify mistakes if any exist:
+
+```{r}
+y <- NLS$lwage76
+z <- (NLS$ed76 > 12)
+v <- NLS$nearc4
+
+Ey_z1v1 <- mean(y[z==1 & v==1]) # sample analogue for E[y|z=1, v=1]
+Ey_z1v0 <- mean(y[z==1 & v==0]) # sample analogue for E[y|z=1, v=0]
+Ey_z0v1 <- mean(y[z==0 & v==1]) # sample analogue for E[y|z=0, v=1]
+Ey_z0v0 <- mean(y[z==0 & v==0]) # sample analogue for E[y|z=0, v=0]
+Pz1_v1 <- mean(z[v==1])         # sample analogue for P(z=1|v=1)
+Pz1_v0 <- mean(z[v==0])         # sample analogue for P(z=1|v=0)
+Pz0_v1 <- mean(z[v==1]==0)      # sample analogue for P(z=0|v=1)
+Pz0_v0 <- mean(z[v==0]==0)      # sample analogue for P(z=0|v=0)
+
+# Bounds given v = 0:
+b1_v0MTS = Ey_z1v0 * Pz1_v0 + Ey_z0v0 * Pz0_v0
+b0_v0MTS = Ey_z0v0
+B1_v0MTS = min(Ey_z1v1,   # for v = 1
+               Ey_z1v0)   # for v = 0
+B0_v0MTS = min(Ey_z0v1 * Pz0_v1 + Ey_z1v1 * Pz1_v1,   # for v = 1
+               Ey_z0v0 * Pz0_v0 + Ey_z1v0 * Pz1_v0)   # for v = 0
+
+# Bounds given v = 1:
+b1_v1MTS = max(Ey_z1v1 * Pz1_v1 + Ey_z0v1 * Pz0_v1,   # for v = 1
+               Ey_z1v0 * Pz1_v0 + Ey_z0v0 * Pz0_v0)   # for v = 0
+b0_v1MTS = max(Ey_z0v1,   # for v = 1
+               Ey_z0v0)   # for v = 0
+B1_v1MTS = Ey_z1v1
+B0_v1MTS = Ey_z0v1 * Pz0_v1 + Ey_z1v1 * Pz1_v1
 
 
+### MIV-MTS bounds on ATE:
+Pv0 <- mean(v==0)
+Pv1 <- mean(v)
+# Lower bound:
+LB <- (b1_v0MTS - B0_v0MTS) * Pv0 + (b1_v1MTS - B0_v1MTS) * Pv1
+# Upper bound:
+UB <- (B1_v0MTS - b0_v0MTS) * Pv0 + (B1_v1MTS - b0_v1MTS) * Pv1
 
+print(c(LB, UB))
+```
+
+If the calculations were performed correctly, we have obtained bounds which, considering the weakness of the assumptions required, are remarkably tight around the usual regression estimates.
