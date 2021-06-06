@@ -87,7 +87,7 @@ summary(first_stage)
 Such an IV estimation is carried out below:
 
 ```{r IV}
-IV <- ivreg(lwage76 ~ ed76 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black +smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668 | .+ nearc4 -ed76, data = NLS, weights = weight)
+IV <- ivreg(lwage76 ~ ed76 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black + smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668 | . + nearc4 -ed76, data = NLS, weights = weight)
 summary(IV)
 ```
 

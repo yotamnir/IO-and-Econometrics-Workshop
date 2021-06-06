@@ -1,0 +1,180 @@
+---
+title: "Assignment-2---Demand"
+author: "Yotam Nir"
+date: "31/5/2021"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### 1. Background and data access
+
+The following block of code loads the data and creates a decades variable that will be used later on:
+
+```{r, results='hide', message=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, fixest)
+cars <- read.csv("cars.csv") %>%
+  as_tibble() %>%
+  mutate(decade = trunc(ye/10))
+```
+
+### 2. Estimating a simple logit model
+
+##### Question 1
+Assuming homogeneous taste parameters regarding car features and price (i.e. $\sigma=0$), the model simplifies to the following form, as we showed in class:
+
+$\pi_{jt} = ln(s_{jt})-ln(s_{0t}) = \delta_{jt} = x_{jt}\beta + \alpha p_{jt} + \xi_{jt}$
+
+In our case, a market is a country-decade pair, and a product is a car model in a particular year in the decade. The grouping by decade serves to aggregate observations to numbers that permit a meaningful estimation, while still taking into account the fact that markets change over time in both their products and their consumers' preferences.
+
+The market share of a product is therefore defined as the average of the country's population in the relevant decade. Using the full population is what the data enables us to do, but it is not ideal because children make up a significant share of the population without truly being a part of the market. If I am not mistaken, this will not generate bias since they enter $s_{0t}$ and affect $ln(s_{jt})-ln(s_{0t})$ by the same constant for all $j$. A second issue is that cars are relatively durable goods, and therefore the sales in one year are likely to be affected by sales in previous years (both because firms may advertise particular models more intensively in particular years, and because consumers who have recently bought a car exit the market). Averaging by decade can perhaps attenuate this problem, because the population is likely to remain mostly unchanged, and because consumers tend to buy new cars once every few years.
+
+The utility weights I include in the model (i.e. $x = (x_1,...,x_K)$) are several variables that exist in the data which we would expect consumers to take into account when choosing a car:
+
+* Horsepower: as a direct measure of engine power (cylinder displacement appeared to me redundant in capturing consumer tastes in this respect, and is therefore not included).
+
+* Weight: as a proxy for car size (I consider width and height to be poorer approximations of the same preference and therefore omit them).
+
+* Fuel efficiency: can be expected to represent both preferences for cost efficiency and environmental considerations. The latter probably serves as an especially pronounced reminder of the strength of our $\sigma=0$ assumption (as does the conflation of both considerations in this variable).
+
+* Maximum speed: as a proxy for car quality (acceleration time omitted as a presumably weaker indicator for the same taste).
+
+* Class: a categorical variable for type of car is available in the data.
+
+* Whether the car is foreign or domestic: consumers might take more pride in their own country's brands.
+
+##### Question 2
+
+First, we need to construct the market shares, and create a meaningful variable for price (there are two problems with the current variable: one is that a single unit of currency is a very small change in the price of a car, and the other is that prices are given in different currencies which also have different purchasing power over time. The solution to these problems chosen here is to create a variable that represents the standard deviations from the mean price in a particular country-year pair):
+
+```{r, message=FALSE}
+# Creating country/decade population averages
+decade <- cars %>%
+  group_by(decade, ma) %>%
+  summarize(avg_pop = mean(pop))
+
+# Combining this to the cars df and creating product shares
+cars <- left_join(cars, decade) %>%
+  mutate(sj = qu / avg_pop)
+
+# Creating outside option share
+s0 <- cars %>%
+  group_by(decade, ma) %>%
+  summarize(s0 = 1 - sum(sj))
+
+# Adding the outside option share to the df
+cars <- left_join(cars, s0)
+
+# Creating the country*year means and standard deviations of price
+sdp <- cars %>%
+  group_by(ye, ma) %>%
+  summarize(mean = mean(pr),
+            sd = sd(pr))
+
+# Combining this to the cars df and creating the standardized price variable
+cars <- left_join(cars, sdp) %>%
+  mutate(sdp = (pr - mean)/sd)
+
+# Removing the intermediate dfs after use
+rm(decade, s0, sdp)
+```
+
+
+Now we can estimate the regression specified above for each of the 15 markets, clustering by year and brand (each car brand sells between 1 and 10 different models):
+
+```{r, message=FALSE}
+# The loops run over each country and decade separately
+for (m in sort(unique(cars$ma))){
+  for (d in sort(unique(cars$decade))){
+    assign(
+      paste0("lm", m, d),   # the name of the object
+      feols(log(sj) - log(s0) ~ sdp + hp + we + li + sp + as.factor(cla) + home, cars %>% filter(ma == m, decade == d), cluster = c("ye", "brd"))
+    )
+  }
+}
+```
+
+
+We can estimate this specification on the full data to see a ($J_t$ weighted) average of the coefficient estimates, but it should be noted that they vary significantly across markets. In particular, we can see that the average coefficient estimate on price is not significantly different from zero. This is a reasonable result since we can expect a wide variety of unobserved demand-side variables to be in $\xi_j$ that would be correlated with both price and market share in the same direction, thus conflating movements along the demand curve with movements of the demand curve.
+
+```{r, message=FALSE}
+summary(feols(log(sj) - log(s0) ~ sdp + hp + we + li + sp + as.factor(cla) + home, cars, cluster = c("ye", "brd")))
+```
+
+
+##### Question 3
+
+One solution to the correlation between price and $\xi_j$ is to use a supply shifter to instrument for price. One possibility, suggested also by Goldberg and Verboven, is to use exchange rates between the exporting and importing countries, because these enter the suppliers' costs without directly affecting demand. A problem with this argument is that exchange rates are correlated with macroeconomic activity, which is in turn correlated with household income and consumption. Therefore, while perhaps not being directly related to car demand, exchange rates might not be orthogonal to it. Including real GDP per capita as a control variable might strengthen the validity of the exclusion restriction.
+
+
+##### Question 4
+
+The exchange rate (xexr – the average exchange rate in the market divided by the average exchange rate in the exporting country) has sufficient power as an instrument for price in most of the markets, but not all of them. The output after the following block of code is the aggregated first stage:
+
+```{r, message=FALSE}
+for (m in sort(unique(cars$ma))){
+  for (d in sort(unique(cars$decade))){
+    assign(
+      paste0("firststage", m, d),   # the name of the object
+      feols(sdp ~ xexr + ergdpc + hp + we + li + sp + as.factor(cla) + home, cars %>% filter(ma == m, decade == d), cluster = c("ye", "brd"))
+    )
+  }
+}
+summary(feols(sdp ~ xexr + ergdpc + hp + we + li + sp + as.factor(cla) + home, cars, cluster = c("ye", "brd")))
+```
+
+
+Using the exchange rate as an IV, we obtain adjusted estimates. The price sensitivity coefficient varies very widely across markets, receiving large numbers both positive and negative. The average is presented in the output below, and implies that a one standard deviation increase in price actually has a huge positive effect on the market share on average. This happens also in markets in which the instrument is powerful, and the most reasonable explanation appears to be that the exclusion restriction is violated – i.e. that the exchange rate may be correlated with the market share not only through its effect on prices, but also through some other channel that I have not recognized.
+
+```{r, message=FALSE}
+for (m in sort(unique(cars$ma))){
+  for (d in sort(unique(cars$decade))){
+    assign(
+      paste0("IV", m, d),   # the name of the object
+      feols(log(sj) - log(s0) ~ ergdpc + hp + we + li + sp + as.factor(cla) + home | sdp ~ xexr, cars %>% filter(ma == m, decade == d), cluster = c("ye", "brd"))
+    )
+  }
+}
+
+summary(feols(log(sj) - log(s0) ~ ergdpc + hp + we + li + sp + as.factor(cla) + home | sdp ~ xexr, cars, cluster = c("ye", "brd")))
+```
+
+##### Question 5
+
+I considered using other instruments such as the number of brands in the market in each year (as a proxy for level of competition) or the tax rate in each year, but neither generates enough within-market variation to satisfy the relevance condition. In the absence of other ideas, I compute the matrix of price elasticities using the estimates from the previous question, although I recognize that they are problematic. I use the German 1980s market.
+
+The elasticities are given by (recall $s_j = \frac{e^{\delta_j}} {1 + \sum_{m=1}^J e^{\delta_m}}$):
+
+* Own-price elasticity: $\eta_{jj} = \frac{\partial s_j}{\partial p_j} * \frac{p_j}{s_j} = \frac{\alpha e^{\delta_j}(1 + \sum_{m=1}^J e^{\delta_m}) - \alpha e^{\delta_j}} {(1 + \sum_{m=1}^J e^{\delta_m})^2} * \frac{p_j}{s_j} = \alpha p_j(\frac{1 + \sum_{m=1}^J e^{\delta_m} - e^{\delta_j}} {1 + \sum_{m=1}^J e^{\delta_m}}) = \alpha p_j(1 - s_j)$
+
+* Cross-price elasticity: $\eta_{jk} = \frac{\partial s_j}{\partial p_k} * \frac{p_k}{s_j} = \frac{0 - \alpha e^{\delta_j} * e^{\delta_k}} {(1 + \sum_{m=1}^J e^{\delta_m})^2} * \frac{p_k}{s_j} = -\alpha p_k s_k$
+
+The expression for the cross-price elasticity appears quite unrealistic, as it returns the same elasticities for all $j \neq k$.
+
+Since the cross-price elasticities are constant per $k$ anyway, I calculate the matrix only for one of the years, 1985, to save computing time. We can calculate these elasticities from our regression estimates and data:
+
+```{r, warning=FALSE}
+Germany85 <- cars %>% filter(ma == 3, ye == 85) %>% select(pr, sj)
+elasticities <- matrix(NA, 74, 74)
+# Cross-price elasticities
+for (k in 1:74){
+  elasticities[,k] <- as.numeric(-IV38$coefficients[2] * Germany85[k, 1] * Germany85[k, 2])
+}
+# Overwriting with own-price elasticities where relevant
+for (j in 1:74){
+  elasticities[j, j] <- as.numeric(IV38$coefficients[2] * Germany85[j, 1] * (1 - Germany85[j, 2]))
+}
+
+# First five products
+elasticities[1:5, 1:5] %>% as_tibble()
+```
+
+The directions of the price elasticities make sense – an increase in a product's own price reduces the quantity of it demanded, and increases demand for other products. The magnitudes, however, are unreasonably large. This is simply due to the unreasonable coefficients I obtained in the previous section.
