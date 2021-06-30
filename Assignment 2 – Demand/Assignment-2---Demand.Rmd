@@ -20,13 +20,19 @@ The following block of code loads the data and creates a decades variable that w
 
 ```{r, results='hide', message=FALSE}
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load(tidyverse, fixest)
+pacman::p_load(
+  tidyverse,
+  fixest,       # used for its clustering options
+  matlib,       # for matrix operations
+  fastDummies,  # for turning categorical variables into dummies
+  rootSolve     # for gradient calculation
+)
 cars <- read.csv("cars.csv") %>%
   as_tibble() %>%
   mutate(decade = trunc(ye/10))
 ```
 
-### 2. Estimating a simple logit model
+### 2a. Estimating a simple logit model (original)
 
 ##### Question 1
 Assuming homogeneous taste parameters regarding car features and price (i.e. $\sigma=0$), the model simplifies to the following form, as we showed in class:
@@ -37,11 +43,11 @@ In our case, a market is a country-decade pair, and a product is a car model in 
 
 The market share of a product is therefore defined as the average of the country's population in the relevant decade. Using the full population is what the data enables us to do, but it is not ideal because children make up a significant share of the population without truly being a part of the market. If I am not mistaken, this will not generate bias since they enter $s_{0t}$ and affect $ln(s_{jt})-ln(s_{0t})$ by the same constant for all $j$. A second issue is that cars are relatively durable goods, and therefore the sales in one year are likely to be affected by sales in previous years (both because firms may advertise particular models more intensively in particular years, and because consumers who have recently bought a car exit the market). Averaging by decade can perhaps attenuate this problem, because the population is likely to remain mostly unchanged, and because consumers tend to buy new cars once every few years.
 
-The utility weights I include in the model (i.e. $x = (x_1,...,x_K)$) are several variables that exist in the data which we would expect consumers to take into account when choosing a car:
+The characteristics I include in the model (i.e. $x = (x_1,...,x_K)$) are several variables that exist in the data which we would expect consumers to take into account when choosing a car:
 
 * Horsepower: as a direct measure of engine power (cylinder displacement appeared to me redundant in capturing consumer tastes in this respect, and is therefore not included).
 
-* Weight: as a proxy for car size (I consider width and height to be poorer approximations of the same preference and therefore omit them).
+* Weight: as a proxy for car size (I consider length, width and height to be poorer approximations of the same preference and therefore omit them).
 
 * Fuel efficiency: can be expected to represent both preferences for cost efficiency and environmental considerations. The latter probably serves as an especially pronounced reminder of the strength of our $\sigma=0$ assumption (as does the conflation of both considerations in this variable).
 
@@ -178,3 +184,296 @@ elasticities[1:5, 1:5] %>% as_tibble()
 ```
 
 The directions of the price elasticities make sense – an increase in a product's own price reduces the quantity of it demanded, and increases demand for other products. The magnitudes, however, are unreasonably large. This is simply due to the unreasonable coefficients I obtained in the previous section.
+
+
+### 2b. Estimating a simple logit model (updated)
+
+Following the discussion in class, I realize that the parameters do not have to be unique per market. This allows to define the market more intuitively as a country-year pair, and also to try the competition IV that I could not use previously. Having learned of the price per per-capita income variable, I also take the opportunity to change to it (the effect on the results is not significant).
+
+I briefly adjust the dataset accordingly and rerun the regressions:
+
+```{r}
+cars <- read.csv("cars.csv") %>%
+  mutate(sj = qu / pop,) %>%    # market share of j
+  group_by(ye, ma) %>%
+  mutate(s0 = 1 - sum(sj),      # outside option share
+         competition = n()) %>% # number of models in the market
+  group_by(ye, co) %>%
+  mutate(
+    tempvar = n(),
+    othermarket_princ = (sum(princ) - princ) / (tempvar - 1)   # average price of model in other markets, to be used as an instrument later
+  ) %>%
+  select(-tempvar) %>%
+  ungroup() %>%
+  filter(!is.na(sp), !is.na(othermarket_princ)) %>%        # removing observations with missing values
+  dummy_cols(select_columns = c("cla", "brd")) # creating separate variables for each class and brand for convenience later on
+```
+
+
+Rerunning OLS and IV with the new specification (note that the instrument is powerful enough):
+
+```{r, message=FALSE}
+# OLS
+OLS <- feols(log(sj) - log(s0) ~ princ + hp + we + li + sp + as.factor(cla) + home, cars, cluster = c("ye", "brd"))
+summary(OLS)
+
+# First stage
+summary(feols(princ ~ competition + hp + we + li + sp + as.factor(cla) + home, cars, cluster = c("ye", "brd")))
+
+# IV
+IV <- feols(log(sj) - log(s0) ~ hp + we + li + sp + as.factor(cla) + home | princ ~ competition, cars, cluster = c("ye", "brd"))
+summary(IV)
+```
+
+
+Now we can estimate the elasticities again. Let us use the smallest market – UK 1970:
+
+```{r}
+UK70 <- cars %>% filter(ma == 5, ye == 70) %>% select(princ, sj)
+elasticities <- matrix(NA,
+                       nrow(UK70),
+                       nrow(UK70))
+# Cross-price elasticities
+for (k in 1:nrow(UK70)){
+  elasticities[,k] <- as.numeric(-IV$coefficients[2] * UK70[k, 1] * UK70[k, 2])
+}
+# Overwriting with own-price elasticities where relevant
+for (j in 1:nrow(UK70)){
+  elasticities[j, j] <- as.numeric(IV$coefficients[2] * UK70[j, 1] * (1 - UK70[j, 2]))
+}
+
+# First five products
+elasticities[1:5, 1:5] %>% as_tibble()
+```
+
+
+### 3. Estimating a random coefficient logit model
+
+##### Question 1
+As we have seen, when $\sigma \neq 0$, the model includes individually unique utility weights:
+
+$u_{ijt} = x_{jt}\beta + \alpha p_{jt} +\xi_{jt} + \sum_{l=1}^{K} \sigma_l v_{il} x_{jtl} + \sigma_p v_{ip} p_{jt} + \epsilon_{ijt}$
+
+where the products $j$, markets $t$, and characteristics $l$ are unchanged from the previous section. While it is more reasonable to assume that none of the utility weights are truly uniform across individuals, this would complicate calculations perhaps more than it is worth. The variables to which it seems particularly important to add random coefficients are to the luxury and compact class types (hoping that the middle types are standard enough to face a smaller range of random coefficients), because the car classes probably capture much of the heterogeneity in other features. Other important variables are given constant coefficients in order to reduce computing time.
+
+I follow the suggestion of Nevo (2000) and henceforth include brand fixed effects.
+
+
+##### Question 2
+
+The following block first generates 1000 random draws of $\nu_{il}$ for each of the variables with a random coefficient.
+
+
+```{r}
+set.seed(100)
+nu <- cbind(
+  rnorm(1000, 0, 1),
+  rnorm(1000, 0, 1)
+)
+```
+
+
+##### Question 3
+
+Now we can use these values to create the contraction mapping function, using our original logit model estimate of $ln(s_j)-ln(s_0)$ as our initial guess for $\delta$. One issue I have encountered and am not sure how to fix (or whether it is a problem at all) is that the exponent in the denominator of $\pi_j (\delta, \sigma)$ is extremely small for some values of sigma, to the point that it is rounded to zero, and so the denominator I obtain simply equals 1 for all products in these cases (I do obtain implied market shares that are close in magnitude to the true market shares).
+
+
+```{r}
+contraction_mapping <- function(sigma){
+  
+
+  # Multiplying the random coefficients by their sigmas
+  sigmanu <- cbind(
+    nu[,1] * sigma[1],
+    nu[,2] * sigma[2]
+  )
+  
+  # Multiplying this by the product features to create mu for each "consumer"
+  mu <- as.matrix(ungroup(cars) %>% select(cla_2, cla_5)) %*% t(sigmanu)
+  
+  ##############################################################################
+  
+  # Summing mu by market (to be placed in the denominator)
+  mu_groups <- cbind(
+    cars %>% select(ye, ma),
+    as_tibble(mu)
+  ) %>%
+    group_by(ye, ma)
+  colnames(mu_groups) <- c("ye", "ma", rep(c("a"), 1000))
+  
+  # First "consumer"
+  mu_all <- (mu_groups %>% select(1:2,3) %>%
+        mutate(a = sum(a)))[,3]
+  # Next 999 consumers
+  for (i in 4:1002){
+    mu_all <- cbind(
+      mu_all,
+      (mu_groups %>% select(1:2,i) %>%
+        mutate(a = sum(a)))[,3]
+    )
+  }
+  
+  ##############################################################################
+
+  # Now we add the deltas
+  cars <- ungroup(cars) %>%
+    mutate(delta = log(cars$sj) - log(cars$s0)) %>% # initial guess = logit model result
+    group_by(ye, ma) %>%
+    mutate(delta_all = sum(delta))  # sum of deltas in the market
+  
+  
+  # Finally, we calculate the choice probabilities:
+  numerator <- rowSums(exp(cars$delta + mu))
+  denominator <- 1 + rowSums(exp(cars$delta_all + as.matrix(mu_all)))
+  pi_delta <- numerator / (denominator * 1000)
+    
+  
+  
+  ##############################################################################
+  # Contraction mapping
+  dist <- 10  # temporary value to start loop
+  
+  while(dist > 1e-6){
+    # Storing the previous delta value
+    olddelta <- cars$delta
+    
+    # Step 2 in the contraction mapping
+    cars <- ungroup(cars) %>%
+      mutate(delta = cars$delta + log(cars$sj) - log(pi_delta)) %>%
+      group_by(ye, ma) %>%
+      mutate(delta_all = sum(delta))  # sum of deltas in the market, for new pi
+    
+    # Check if we have reached the tolerance level
+    dist <- norm(as.matrix(cars$delta - olddelta))
+    
+    # Creating the new pi(delta, sigma)
+    numerator <- rowSums(exp(cars$delta + mu))
+    denominator <- 1 + rowSums(exp(cars$delta_all + as.matrix(mu_all)))
+    pi_delta <- numerator / (denominator * 1000)
+  }
+  
+  delta <- cars$delta
+}
+```
+
+
+
+##### Question 4
+
+First, since the characteristics and instruments do not change across the iterations, we can create their matrices in advance:
+
+```{r}
+X <- as.matrix(cars %>% select(princ, hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, starts_with("brd_"), -brd_1))  # including price
+
+Z <- as.matrix(cars %>% select(hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, competition, xexr, tax, othermarket_princ, starts_with("brd_"), -brd_1))
+```
+
+The instruments I use are firstly the competition and average exchange rate instruments from the previous section and the tax rate, which can also plausibly serve as an instrument because it is not likely to be correlated with tastes directly, while it does affect prices. Another instrument I use is the price of the model in other markets, which as discussed by Nevo (2000), should be a valid instrument if the residuals between markets are uncorrelated. This is inconsistent with my earlier clustering of standard errors by brand, but I still choose to use the instrument here for the purpose of the exercise, and hope that the residuals are indeed uncorrelated.
+
+Now we program the GMM function:
+
+```{r}
+gmm <- function(theta){
+  
+  # Creating delta(sigma)
+  delta <- contraction_mapping(c(theta[1], theta[2]))
+  
+  # Creating xi = delta - x*beta -p*alpha
+  xi <- delta - X %*% c(theta[3:(ncol(X) + 2)])
+  
+  # Creating V and then W as its inverse
+  V <- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
+  for(i in 1:ncol(Z)){
+    for(j in 1:ncol(Z)){
+      V[i, j] = mean((Z[,i] * xi) * (Z[,j] * xi))
+    }
+  }
+  W <- inv(V)
+  
+  # Creating the moment equations
+  moments <- sapply(as_tibble(Z) * xi, mean)  # multiplying each column of Z by xi, and then taking the means of these columns for the sample analogue
+  
+  # GMM minimization function
+  t(moments) %*% W %*% moments
+  
+  return(t(moments) %*% W %*% moments)
+}
+```
+
+
+##### Question 5
+
+The following block attempts to minimize the GMM objective function. I constrain the $\sigma$s to be non-negative, and I also constrain them to be no more than twice as large as the standard errors of their corresponding coefficients in the IV estimation. This is necessary because trying larger values can prevent the function from running (R rounds very large numbers in the denominator of the integral to infinity), and I believe that twice the size of the original standard errors is a reasonable bound on the $\sigma$s.
+
+```{r, warning=FALSE, message=FALSE}
+# First running IV again with fixed effects, just for the starting guess of coefficients
+IV2 <- feols(log(sj) - log(s0) ~ hp + we + li + sp + factor(cla) + home + factor(brd) | princ ~ competition, cars, cluster = c("ye", "brd"))
+
+# Creating constraint matrices for the values of the random coefficients
+ui <- rbind(
+  c(1, rep(0, ncol(X) + 1)),
+  c(0, 1, rep(0, ncol(X))),
+  c(-1, rep(0, ncol(X) + 1)),
+  c(0, -1, rep(0, ncol(X)))
+)
+
+ci <- c(0, 0, -IV2$se[c(7,10)] * 2)
+
+theta <- constrOptim(
+  theta = c(IV2$se[c(7,10)], IV2$coefficients[2:length(IV2$coefficients)]),  # initial guess is IV parameters
+  f = gmm,
+  ui = ui,
+  ci = ci,
+  method = "Nelder-Mead",
+  control = list(maxit = 1) # Note: in one iteration there are multiple evaluations, so we do not end up with exactly our initial guess
+)
+```
+
+##### Question 6
+
+Next I calculate the standard errors of the coefficients we have obtained (these are the square roots of the elements on the diagonal of $[D'V^{-1}D]^{-1}$ divided by $n$, where $D = E(\frac{\partial m(X_i; \theta^0)}{\partial \theta'})$).
+
+
+```{r}
+# Replicating delta(sigma) (needed for the next step)
+delta <- contraction_mapping(c(theta$par[1:2]))
+
+# Creating a function for the moment equations so that their gradients can be evaluated at the estimated theta
+moments <- function(par){
+  sapply(as_tibble(Z) * (delta - X %*% c(par[1:(ncol(X))])), mean)
+}
+
+# Creating D
+D <- gradient(moments, theta$par)
+
+
+
+# Creating V for the estimated parameters
+V <- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
+for(i in 1:ncol(Z)){
+  for(j in 1:ncol(Z)){
+    V[i, j] = mean((Z[,i] * (delta - X %*% theta$par[3:(ncol(X) + 2)])) * (Z[,j] * (delta - X %*% theta$par[3:(ncol(X) + 2)])))
+  }
+}
+
+
+# Estimating the standard errors
+#SE <- sqrt(diag(inv(t(D) %*% inv(V) %*% D)) / nrow(X))
+```
+
+
+##### Question 7
+Unfortunately my estimate of $D'V^{-1}D$ is currently singular, and so I do not yet have standard errors for the estimates. But just looking at the coefficients themselves, the results currently do not necessarily look more credible than the logit model's estimates. We can see that price still has a negative coefficient, but that the sizes of the class types' utility weights are unreasonable relative to each other. This could be due to a poor methodological choice of random coefficients, or possibly also due to my limiting of the optimization function's number of iterations.
+
+The random coefficients appear reasonable (although, again, I cannot comment on their significance). They are proportioned relative to each other similarly to the IV estimate's standard errors, and are both larger than them.
+
+```{r}
+# Mean utility weights
+theta$par[3:length(theta$par)]
+
+# Random coefficients
+theta$par[1:2]
+```
+
+
+
