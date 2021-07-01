@@ -446,8 +446,6 @@ moments <- function(par){
 # Creating D
 D <- gradient(moments, theta$par)
 
-
-
 # Creating V for the estimated parameters
 V <- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
 for(i in 1:ncol(Z)){
