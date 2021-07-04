@@ -254,7 +254,7 @@ As we have seen, when $\sigma \neq 0$, the model includes individually unique ut
 
 $u_{ijt} = x_{jt}\beta + \alpha p_{jt} +\xi_{jt} + \sum_{l=1}^{K} \sigma_l v_{il} x_{jtl} + \sigma_p v_{ip} p_{jt} + \epsilon_{ijt}$
 
-where the products $j$, markets $t$, and characteristics $l$ are unchanged from the previous section. While it is more reasonable to assume that none of the utility weights are truly uniform across individuals, this would complicate calculations perhaps more than it is worth. The variables to which it seems particularly important to add random coefficients are to the luxury and compact class types (hoping that the middle types are standard enough to face a smaller range of random coefficients), because the car classes probably capture much of the heterogeneity in other features. Other important variables are given constant coefficients in order to reduce computing time.
+where the products $j$, markets $t$, and characteristics $l$ are unchanged from the previous section. While it is more reasonable to assume that none of the utility weights are truly uniform across individuals, this would increase calculation times perhaps more than it is worth. The variables to which it seems particularly important to add random coefficients are to price (allowing different individuals different price elasticities), and to fuel efficiency (some people are more environmentally conscious than others, and differences in fuel prices across markets and time-periods may also create heterogeneity). Other important variables are given constant coefficients in order to reduce computing time.
 
 I follow the suggestion of Nevo (2000) and henceforth include brand fixed effects.
 
@@ -281,7 +281,7 @@ Now we can use these values to create the contraction mapping function, using ou
 ```{r}
 contraction_mapping <- function(sigma){
   
-
+  
   # Multiplying the random coefficients by their sigmas
   sigmanu <- cbind(
     nu[,1] * sigma[1],
@@ -289,7 +289,7 @@ contraction_mapping <- function(sigma){
   )
   
   # Multiplying this by the product features to create mu for each "consumer"
-  mu <- as.matrix(ungroup(cars) %>% select(cla_2, cla_5)) %*% t(sigmanu)
+  mu <- as.matrix(ungroup(cars) %>% select(princ, li)) %*% t(sigmanu)
   
   ##############################################################################
   
@@ -303,18 +303,18 @@ contraction_mapping <- function(sigma){
   
   # First "consumer"
   mu_all <- (mu_groups %>% select(1:2,3) %>%
-        mutate(a = sum(a)))[,3]
+               mutate(a = sum(a)))[,3]
   # Next 999 consumers
   for (i in 4:1002){
     mu_all <- cbind(
       mu_all,
       (mu_groups %>% select(1:2,i) %>%
-        mutate(a = sum(a)))[,3]
+         mutate(a = sum(a)))[,3]
     )
   }
   
   ##############################################################################
-
+  
   # Now we add the deltas
   cars <- ungroup(cars) %>%
     mutate(delta = log(cars$sj) - log(cars$s0)) %>% # initial guess = logit model result
@@ -326,7 +326,7 @@ contraction_mapping <- function(sigma){
   numerator <- rowSums(exp(cars$delta + mu))
   denominator <- 1 + rowSums(exp(cars$delta_all + as.matrix(mu_all)))
   pi_delta <- numerator / (denominator * 1000)
-    
+  
   
   
   ##############################################################################
@@ -362,53 +362,53 @@ contraction_mapping <- function(sigma){
 
 First, since the characteristics and instruments do not change across the iterations, we can create their matrices in advance:
 
-```{r}
+```{r, warning=FALSE, message=FALSE}
 X <- as.matrix(cars %>% select(princ, hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, starts_with("brd_"), -brd_1))  # including price
 
 Z <- as.matrix(cars %>% select(hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, competition, xexr, tax, othermarket_princ, starts_with("brd_"), -brd_1))
+
+# Running IV, just for the starting guess of coefficients
+IV <- feols(log(sj) - log(s0) ~ hp + we + li + sp + factor(cla) + home + factor(brd) | princ ~ competition + xexr + tax + othermarket_princ, cars, cluster = c("ye", "brd"))
 ```
 
 The instruments I use are firstly the competition and average exchange rate instruments from the previous section and the tax rate, which can also plausibly serve as an instrument because it is not likely to be correlated with tastes directly, while it does affect prices. Another instrument I use is the price of the model in other markets, which as discussed by Nevo (2000), should be a valid instrument if the residuals between markets are uncorrelated. This is inconsistent with my earlier clustering of standard errors by brand, but I still choose to use the instrument here for the purpose of the exercise, and hope that the residuals are indeed uncorrelated.
 
-Now we program the GMM function:
+Now we program the GMM functions, starting with the initial iteration (with $W = I$), and then adding the function that takes the updated coefficient's $W = (V^{(1)})^{-1}$:
 
 ```{r}
-gmm <- function(theta){
-  
+gmm_initial <- function(theta){
   # Creating delta(sigma)
-  delta <- contraction_mapping(c(theta[1], theta[2]))
+  delta <- contraction_mapping(c(theta[1:ncol(nu)]))
   
   # Creating xi = delta - x*beta -p*alpha
-  xi <- delta - X %*% c(theta[3:(ncol(X) + 2)])
-  
-  # Creating V and then W as its inverse
-  V <- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
-  for(i in 1:ncol(Z)){
-    for(j in 1:ncol(Z)){
-      V[i, j] = mean((Z[,i] * xi) * (Z[,j] * xi))
-    }
-  }
-  W <- inv(V)
+  xi <- delta - X %*% c(theta[(ncol(nu) + 1):(ncol(X) + ncol(nu))])
   
   # Creating the moment equations
   moments <- sapply(as_tibble(Z) * xi, mean)  # multiplying each column of Z by xi, and then taking the means of these columns for the sample analogue
   
-  # GMM minimization function
-  t(moments) %*% W %*% moments
+  # GMM minimization function, using W = I for first evaluation
+  return(t(moments) %*% moments)
+}
+
+################################################################################
+
+gmm_updated <- function(theta){
   
+  # Creating the moment equations
+  moments <- sapply(as_tibble(Z) * (contraction_mapping(theta[1:ncol(nu)]) - X %*% c(theta[(ncol(nu) + 1):(ncol(X) + ncol(nu))])), mean)  # multiplying each column of Z by xi, and then taking the means of these columns for the sample analogue
+  
+  # GMM minimization function
   return(t(moments) %*% W %*% moments)
+  
 }
 ```
 
 
 ##### Question 5
 
-The following block attempts to minimize the GMM objective function. I constrain the $\sigma$s to be non-negative, and I also constrain them to be no more than twice as large as the standard errors of their corresponding coefficients in the IV estimation. This is necessary because trying larger values can prevent the function from running (R rounds very large numbers in the denominator of the integral to infinity), and I believe that twice the size of the original standard errors is a reasonable bound on the $\sigma$s.
+The following block attempts to minimize the GMM objective function with $W = I$. I constrain the $\sigma$s to be non-negative, and I also constrain them to be no more than twice as large as the standard errors of their corresponding coefficients in the IV estimation. This is necessary because trying larger values can prevent the function from running (R rounds very large numbers in the denominator of the integral to infinity), and I believe that twice the size of the original standard errors is a reasonable bound on the $\sigma$s.
 
 ```{r, warning=FALSE, message=FALSE}
-# First running IV again with fixed effects, just for the starting guess of coefficients
-IV2 <- feols(log(sj) - log(s0) ~ hp + we + li + sp + factor(cla) + home + factor(brd) | princ ~ competition, cars, cluster = c("ye", "brd"))
-
 # Creating constraint matrices for the values of the random coefficients
 ui <- rbind(
   c(1, rep(0, ncol(X) + 1)),
@@ -416,18 +416,47 @@ ui <- rbind(
   c(-1, rep(0, ncol(X) + 1)),
   c(0, -1, rep(0, ncol(X)))
 )
+ci <- c(0, 0, -IV$se[2] * 2, -IV$se[5] * 2)
 
-ci <- c(0, 0, -IV2$se[c(7,10)] * 2)
-
-theta <- constrOptim(
-  theta = c(IV2$se[c(7,10)], IV2$coefficients[2:length(IV2$coefficients)]),  # initial guess is IV parameters
-  f = gmm,
+# Optimizing
+theta_1 <- constrOptim(
+  theta = c(IV$se[c(2, 5)], IV$coefficients[2:length(IV$coefficients)]),  # initial guess is IV parameters
+  f = gmm_initial,
   ui = ui,
   ci = ci,
   method = "Nelder-Mead",
-  control = list(maxit = 1) # Note: in one iteration there are multiple evaluations, so we do not end up with exactly our initial guess
+  control = list(maxit = 200)
 )
 ```
+
+
+Now we can calculate the relevant value of $W$, and then minimize using it:
+
+```{r}
+# Creating delta(sigma) and xi of theta_1 for the next step
+delta_1 <- contraction_mapping(c(theta_1$par[1:ncol(nu)]))
+xi_1 <- delta_1 - X %*% c(theta_1$par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])
+
+# Creating V of theta_1 and then W as its inverse
+V <- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
+for(i in 1:ncol(Z)){
+  for(j in 1:ncol(Z)){
+    V[i, j] = mean((Z[,i] * xi_1) * (Z[,j] * xi_1))
+  }
+}
+W <- inv(V)
+
+# Optimizing
+theta <- constrOptim(
+  theta = theta_1$par,  # initial guess is previous round's estimate
+  f = gmm_updated,
+  ui = ui,
+  ci = ci,
+  method = "Nelder-Mead",
+  control = list(maxit = 20)
+)
+```
+
 
 ##### Question 6
 
@@ -435,12 +464,12 @@ Next I calculate the standard errors of the coefficients we have obtained (these
 
 
 ```{r}
-# Replicating delta(sigma) (needed for the next step)
-delta <- contraction_mapping(c(theta$par[1:2]))
+# Replicating delta(sigma) (needed for creating V below)
+delta <- contraction_mapping(c(theta$par[1:ncol(nu)]))
 
 # Creating a function for the moment equations so that their gradients can be evaluated at the estimated theta
 moments <- function(par){
-  sapply(as_tibble(Z) * (delta - X %*% c(par[1:(ncol(X))])), mean)
+  sapply(as_tibble(Z) * (contraction_mapping(c(par[1:ncol(nu)])) - X %*% c(par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])), mean)
 }
 
 # Creating D
@@ -450,27 +479,22 @@ D <- gradient(moments, theta$par)
 V <- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
 for(i in 1:ncol(Z)){
   for(j in 1:ncol(Z)){
-    V[i, j] = mean((Z[,i] * (delta - X %*% theta$par[3:(ncol(X) + 2)])) * (Z[,j] * (delta - X %*% theta$par[3:(ncol(X) + 2)])))
+    V[i, j] = mean((Z[,i] * (delta - X %*% theta$par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])) * (Z[,j] * (delta - X %*% theta$par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])))
   }
 }
 
-
 # Estimating the standard errors
-#SE <- sqrt(diag(inv(t(D) %*% inv(V) %*% D)) / nrow(X))
+SE <- sqrt(diag(inv(t(D) %*% inv(V) %*% D)) / nrow(X))
 ```
 
 
 ##### Question 7
-Unfortunately my estimate of $D'V^{-1}D$ is currently singular, and so I do not yet have standard errors for the estimates. But just looking at the coefficients themselves, the results currently do not necessarily look more credible than the logit model's estimates. We can see that price still has a negative coefficient, but that the sizes of the class types' utility weights are unreasonable relative to each other. This could be due to a poor methodological choice of random coefficients, or possibly also due to my limiting of the optimization function's number of iterations.
-
-The random coefficients appear reasonable (although, again, I cannot comment on their significance). They are proportioned relative to each other similarly to the IV estimate's standard errors, and are both larger than them.
+The results appear quite reasonable. I obtain reasonable and significant values for the random coefficient on price and for the mean utility weight of price, but the random coefficient on fuel efficiency is very insignificant. It should be noted that I have limited the optimization functions to maximum numbers of iterations due to the length of their run times (after being limited, both evaluations still take about three hours each), and therefore the coefficients presented here might not be as accurate as they could be.
 
 ```{r}
-# Mean utility weights
-theta$par[3:length(theta$par)]
-
-# Random coefficients
-theta$par[1:2]
+results <- tibble(coef = theta$par, SE = SE, t = coef/SE) %>% as.matrix()
+rownames(results) <- c("price_randcoef", "li_randcoef", names(theta$par[(ncol(nu) + 1):length(theta$par)]))
+results
 ```
 
 

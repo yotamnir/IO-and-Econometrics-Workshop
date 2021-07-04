@@ -573,7 +573,7 @@ elasticities[1:5, 1:5] %&gt;% as_tibble()</code></pre>
 <h5>Question 1</h5>
 <p>As we have seen, when <span class="math inline">\(\sigma \neq 0\)</span>, the model includes individually unique utility weights:</p>
 <p><span class="math inline">\(u_{ijt} = x_{jt}\beta + \alpha p_{jt} +\xi_{jt} + \sum_{l=1}^{K} \sigma_l v_{il} x_{jtl} + \sigma_p v_{ip} p_{jt} + \epsilon_{ijt}\)</span></p>
-<p>where the products <span class="math inline">\(j\)</span>, markets <span class="math inline">\(t\)</span>, and characteristics <span class="math inline">\(l\)</span> are unchanged from the previous section. While it is more reasonable to assume that none of the utility weights are truly uniform across individuals, this would complicate calculations perhaps more than it is worth. The variables to which it seems particularly important to add random coefficients are to the luxury and compact class types (hoping that the middle types are standard enough to face a smaller range of random coefficients), because the car classes probably capture much of the heterogeneity in other features. Other important variables are given constant coefficients in order to reduce computing time.</p>
+<p>where the products <span class="math inline">\(j\)</span>, markets <span class="math inline">\(t\)</span>, and characteristics <span class="math inline">\(l\)</span> are unchanged from the previous section. While it is more reasonable to assume that none of the utility weights are truly uniform across individuals, this would increase calculation times perhaps more than it is worth. The variables to which it seems particularly important to add random coefficients are to price (allowing different individuals different price elasticities), and to fuel efficiency (some people are more environmentally conscious than others, and differences in fuel prices across markets and time-periods may also create heterogeneity). Other important variables are given constant coefficients in order to reduce computing time.</p>
 <p>I follow the suggestion of Nevo (2000) and henceforth include brand fixed effects.</p>
 </div>
 <div id="question-2-1" class="section level5">
@@ -590,7 +590,7 @@ nu &lt;- cbind(
 <p>Now we can use these values to create the contraction mapping function, using our original logit model estimate of <span class="math inline">\(ln(s_j)-ln(s_0)\)</span> as our initial guess for <span class="math inline">\(\delta\)</span>. One issue I have encountered and am not sure how to fix (or whether it is a problem at all) is that the exponent in the denominator of <span class="math inline">\(\pi_j (\delta, \sigma)\)</span> is extremely small for some values of sigma, to the point that it is rounded to zero, and so the denominator I obtain simply equals 1 for all products in these cases (I do obtain implied market shares that are close in magnitude to the true market shares).</p>
 <pre class="r"><code>contraction_mapping &lt;- function(sigma){
   
-
+  
   # Multiplying the random coefficients by their sigmas
   sigmanu &lt;- cbind(
     nu[,1] * sigma[1],
@@ -598,7 +598,7 @@ nu &lt;- cbind(
   )
   
   # Multiplying this by the product features to create mu for each &quot;consumer&quot;
-  mu &lt;- as.matrix(ungroup(cars) %&gt;% select(cla_2, cla_5)) %*% t(sigmanu)
+  mu &lt;- as.matrix(ungroup(cars) %&gt;% select(princ, li)) %*% t(sigmanu)
   
   ##############################################################################
   
@@ -612,18 +612,18 @@ nu &lt;- cbind(
   
   # First &quot;consumer&quot;
   mu_all &lt;- (mu_groups %&gt;% select(1:2,3) %&gt;%
-        mutate(a = sum(a)))[,3]
+               mutate(a = sum(a)))[,3]
   # Next 999 consumers
   for (i in 4:1002){
     mu_all &lt;- cbind(
       mu_all,
       (mu_groups %&gt;% select(1:2,i) %&gt;%
-        mutate(a = sum(a)))[,3]
+         mutate(a = sum(a)))[,3]
     )
   }
   
   ##############################################################################
-
+  
   # Now we add the deltas
   cars &lt;- ungroup(cars) %&gt;%
     mutate(delta = log(cars$sj) - log(cars$s0)) %&gt;% # initial guess = logit model result
@@ -635,7 +635,7 @@ nu &lt;- cbind(
   numerator &lt;- rowSums(exp(cars$delta + mu))
   denominator &lt;- 1 + rowSums(exp(cars$delta_all + as.matrix(mu_all)))
   pi_delta &lt;- numerator / (denominator * 1000)
-    
+  
   
   
   ##############################################################################
@@ -669,118 +669,168 @@ nu &lt;- cbind(
 <p>First, since the characteristics and instruments do not change across the iterations, we can create their matrices in advance:</p>
 <pre class="r"><code>X &lt;- as.matrix(cars %&gt;% select(princ, hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, starts_with(&quot;brd_&quot;), -brd_1))  # including price
 
-Z &lt;- as.matrix(cars %&gt;% select(hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, competition, xexr, tax, othermarket_princ, starts_with(&quot;brd_&quot;), -brd_1))</code></pre>
+Z &lt;- as.matrix(cars %&gt;% select(hp, we, li, sp, cla_2, cla_3, cla_4, cla_5, home, competition, xexr, tax, othermarket_princ, starts_with(&quot;brd_&quot;), -brd_1))
+
+# Running IV, just for the starting guess of coefficients
+IV &lt;- feols(log(sj) - log(s0) ~ hp + we + li + sp + factor(cla) + home + factor(brd) | princ ~ competition + xexr + tax + othermarket_princ, cars, cluster = c(&quot;ye&quot;, &quot;brd&quot;))</code></pre>
+<pre><code>## Variance contained negative values in the diagonal and was &#39;fixed&#39; (a la Cameron, Gelbach &amp; Miller 2011).
+## Variance contained negative values in the diagonal and was &#39;fixed&#39; (a la Cameron, Gelbach &amp; Miller 2011).</code></pre>
 <p>The instruments I use are firstly the competition and average exchange rate instruments from the previous section and the tax rate, which can also plausibly serve as an instrument because it is not likely to be correlated with tastes directly, while it does affect prices. Another instrument I use is the price of the model in other markets, which as discussed by Nevo (2000), should be a valid instrument if the residuals between markets are uncorrelated. This is inconsistent with my earlier clustering of standard errors by brand, but I still choose to use the instrument here for the purpose of the exercise, and hope that the residuals are indeed uncorrelated.</p>
-<p>Now we program the GMM function:</p>
-<pre class="r"><code>gmm &lt;- function(theta){
-  
+<p>Now we program the GMM functions, starting with the initial iteration (with <span class="math inline">\(W = I\)</span>), and then adding the function that takes the updated coefficient’s <span class="math inline">\(W = (V^{(1)})^{-1}\)</span>:</p>
+<pre class="r"><code>gmm_initial &lt;- function(theta){
   # Creating delta(sigma)
-  delta &lt;- contraction_mapping(c(theta[1], theta[2]))
+  delta &lt;- contraction_mapping(c(theta[1:ncol(nu)]))
   
   # Creating xi = delta - x*beta -p*alpha
-  xi &lt;- delta - X %*% c(theta[3:(ncol(X) + 2)])
-  
-  # Creating V and then W as its inverse
-  V &lt;- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
-  for(i in 1:ncol(Z)){
-    for(j in 1:ncol(Z)){
-      V[i, j] = mean((Z[,i] * xi) * (Z[,j] * xi))
-    }
-  }
-  W &lt;- inv(V)
+  xi &lt;- delta - X %*% c(theta[(ncol(nu) + 1):(ncol(X) + ncol(nu))])
   
   # Creating the moment equations
   moments &lt;- sapply(as_tibble(Z) * xi, mean)  # multiplying each column of Z by xi, and then taking the means of these columns for the sample analogue
   
-  # GMM minimization function
-  t(moments) %*% W %*% moments
+  # GMM minimization function, using W = I for first evaluation
+  return(t(moments) %*% moments)
+}
+
+################################################################################
+
+gmm_updated &lt;- function(theta){
   
+  # Creating the moment equations
+  moments &lt;- sapply(as_tibble(Z) * (contraction_mapping(theta[1:ncol(nu)]) - X %*% c(theta[(ncol(nu) + 1):(ncol(X) + ncol(nu))])), mean)  # multiplying each column of Z by xi, and then taking the means of these columns for the sample analogue
+  
+  # GMM minimization function
   return(t(moments) %*% W %*% moments)
+  
 }</code></pre>
 </div>
 <div id="question-5-1" class="section level5">
 <h5>Question 5</h5>
-<p>The following block attempts to minimize the GMM objective function. I constrain the <span class="math inline">\(\sigma\)</span>s to be non-negative, and I also constrain them to be no more than twice as large as the standard errors of their corresponding coefficients in the IV estimation. This is necessary because trying larger values can prevent the function from running (R rounds very large numbers in the denominator of the integral to infinity), and I believe that twice the size of the original standard errors is a reasonable bound on the <span class="math inline">\(\sigma\)</span>s.</p>
-<pre class="r"><code># First running IV again with fixed effects, just for the starting guess of coefficients
-IV2 &lt;- feols(log(sj) - log(s0) ~ hp + we + li + sp + factor(cla) + home + factor(brd) | princ ~ competition, cars, cluster = c(&quot;ye&quot;, &quot;brd&quot;))
-
-# Creating constraint matrices for the values of the random coefficients
+<p>The following block attempts to minimize the GMM objective function with <span class="math inline">\(W = I\)</span>. I constrain the <span class="math inline">\(\sigma\)</span>s to be non-negative, and I also constrain them to be no more than twice as large as the standard errors of their corresponding coefficients in the IV estimation. This is necessary because trying larger values can prevent the function from running (R rounds very large numbers in the denominator of the integral to infinity), and I believe that twice the size of the original standard errors is a reasonable bound on the <span class="math inline">\(\sigma\)</span>s.</p>
+<pre class="r"><code># Creating constraint matrices for the values of the random coefficients
 ui &lt;- rbind(
   c(1, rep(0, ncol(X) + 1)),
   c(0, 1, rep(0, ncol(X))),
   c(-1, rep(0, ncol(X) + 1)),
   c(0, -1, rep(0, ncol(X)))
 )
+ci &lt;- c(0, 0, -IV$se[2] * 2, -IV$se[5] * 2)
 
-ci &lt;- c(0, 0, -IV2$se[c(7,10)] * 2)
-
-theta &lt;- constrOptim(
-  theta = c(IV2$se[c(7,10)], IV2$coefficients[2:length(IV2$coefficients)]),  # initial guess is IV parameters
-  f = gmm,
+# Optimizing
+theta_1 &lt;- constrOptim(
+  theta = c(IV$se[c(2, 5)], IV$coefficients[2:length(IV$coefficients)]),  # initial guess is IV parameters
+  f = gmm_initial,
   ui = ui,
   ci = ci,
   method = &quot;Nelder-Mead&quot;,
-  control = list(maxit = 1) # Note: in one iteration there are multiple evaluations, so we do not end up with exactly our initial guess
+  control = list(maxit = 200)
+)</code></pre>
+<p>Now we can calculate the relevant value of <span class="math inline">\(W\)</span>, and then minimize using it:</p>
+<pre class="r"><code># Creating delta(sigma) and xi of theta_1 for the next step
+delta_1 &lt;- contraction_mapping(c(theta_1$par[1:ncol(nu)]))
+xi_1 &lt;- delta_1 - X %*% c(theta_1$par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])
+
+# Creating V of theta_1 and then W as its inverse
+V &lt;- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
+for(i in 1:ncol(Z)){
+  for(j in 1:ncol(Z)){
+    V[i, j] = mean((Z[,i] * xi_1) * (Z[,j] * xi_1))
+  }
+}
+W &lt;- inv(V)
+
+# Optimizing
+theta &lt;- constrOptim(
+  theta = theta_1$par,  # initial guess is previous round&#39;s estimate
+  f = gmm_updated,
+  ui = ui,
+  ci = ci,
+  method = &quot;Nelder-Mead&quot;,
+  control = list(maxit = 20)
 )</code></pre>
 </div>
 <div id="question-6" class="section level5">
 <h5>Question 6</h5>
 <p>Next I calculate the standard errors of the coefficients we have obtained (these are the square roots of the elements on the diagonal of <span class="math inline">\([D&#39;V^{-1}D]^{-1}\)</span> divided by <span class="math inline">\(n\)</span>, where <span class="math inline">\(D = E(\frac{\partial m(X_i; \theta^0)}{\partial \theta&#39;})\)</span>).</p>
-<pre class="r"><code># Replicating delta(sigma) (needed for the next step)
-delta &lt;- contraction_mapping(c(theta$par[1:2]))
+<pre class="r"><code># Replicating delta(sigma) (needed for creating V below)
+delta &lt;- contraction_mapping(c(theta$par[1:ncol(nu)]))
 
 # Creating a function for the moment equations so that their gradients can be evaluated at the estimated theta
 moments &lt;- function(par){
-  sapply(as_tibble(Z) * (delta - X %*% c(par[1:(ncol(X))])), mean)
+  sapply(as_tibble(Z) * (contraction_mapping(c(par[1:ncol(nu)])) - X %*% c(par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])), mean)
 }
 
 # Creating D
 D &lt;- gradient(moments, theta$par)
 
-
-
 # Creating V for the estimated parameters
 V &lt;- matrix(NA, nrow = ncol(Z), ncol = ncol(Z))
 for(i in 1:ncol(Z)){
   for(j in 1:ncol(Z)){
-    V[i, j] = mean((Z[,i] * (delta - X %*% theta$par[3:(ncol(X) + 2)])) * (Z[,j] * (delta - X %*% theta$par[3:(ncol(X) + 2)])))
+    V[i, j] = mean((Z[,i] * (delta - X %*% theta$par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])) * (Z[,j] * (delta - X %*% theta$par[(ncol(nu) + 1):(ncol(X) + ncol(nu))])))
   }
 }
 
-
 # Estimating the standard errors
-#SE &lt;- sqrt(diag(inv(t(D) %*% inv(V) %*% D)) / nrow(X))</code></pre>
+SE &lt;- sqrt(diag(inv(t(D) %*% inv(V) %*% D)) / nrow(X))</code></pre>
 </div>
 <div id="question-7" class="section level5">
 <h5>Question 7</h5>
-<p>Unfortunately my estimate of <span class="math inline">\(D&#39;V^{-1}D\)</span> is currently singular, and so I do not yet have standard errors for the estimates. But just looking at the coefficients themselves, the results currently do not necessarily look more credible than the logit model’s estimates. We can see that price still has a negative coefficient, but that the sizes of the class types’ utility weights are unreasonable relative to each other. This could be due to a poor methodological choice of random coefficients, or possibly also due to my limiting of the optimization function’s number of iterations.</p>
-<p>The random coefficients appear reasonable (although, again, I cannot comment on their significance). They are proportioned relative to each other similarly to the IV estimate’s standard errors, and are both larger than them.</p>
-<pre class="r"><code># Mean utility weights
-theta$par[3:length(theta$par)]</code></pre>
-<pre><code>##     fit_princ            hp            we            li            sp 
-##  -3.069711426   0.307204185   0.001007983  -0.026066356   0.618226769 
-##  factor(cla)2  factor(cla)3  factor(cla)4  factor(cla)5          home 
-##   0.294551914   0.569189504   0.157302882   0.528892434   1.590603233 
-##  factor(brd)2  factor(brd)3  factor(brd)4  factor(brd)5  factor(brd)7 
-##   1.184452577   1.566534795   0.413148786  -1.620826105   0.330934671 
-##  factor(brd)8  factor(brd)9 factor(brd)10 factor(brd)11 factor(brd)14 
-##   0.922896833   0.109930605  -1.414997101  -0.975727180  -0.529783341 
-## factor(brd)15 factor(brd)16 factor(brd)17 factor(brd)18 factor(brd)19 
-##  -0.096853044   2.642721478  -0.626040191   0.231524564   0.636247448 
-## factor(brd)20 factor(brd)22 factor(brd)23 factor(brd)24 factor(brd)25 
-##   0.704587570   0.867941537  -0.293637056   0.213331561  -0.484320644 
-## factor(brd)26 factor(brd)27 factor(brd)28 factor(brd)29 factor(brd)30 
-##   0.158639103  -1.840150228  -1.110645542   0.076791681   0.945424956 
-## factor(brd)31 factor(brd)32 factor(brd)33 factor(brd)34 factor(brd)35 
-##   0.768786381  -1.556230327  -0.259011404  -2.211879582  -0.884702336 
-## factor(brd)36 factor(brd)37 factor(brd)40 factor(brd)42 factor(brd)43 
-##  -0.243739854  -0.512405165   0.966208970   0.805046166  -0.302232555 
-## factor(brd)44 factor(brd)45 factor(brd)46 factor(brd)47 
-##  -0.670334437  -0.581837730   0.566723338  -0.542022892</code></pre>
-<pre class="r"><code># Random coefficients
-theta$par[1:2]</code></pre>
-<pre><code>## factor(cla)2 factor(cla)5 
-##    0.1351633    0.4165023</code></pre>
+<p>The results appear quite reasonable. I obtain reasonable and significant values for the random coefficient on price and for the mean utility weight of price, but the random coefficient on fuel efficiency is very insignificant. It should be noted that I have limited the optimization functions to maximum numbers of iterations due to the length of their run times (after being limited, both evaluations still take about three hours each), and therefore the coefficients presented here might not be as accurate as they could be.</p>
+<pre class="r"><code>results &lt;- tibble(coef = theta$par, SE = SE, t = coef/SE) %&gt;% as.matrix()
+rownames(results) &lt;- c(&quot;price_randcoef&quot;, &quot;li_randcoef&quot;, names(theta$par[(ncol(nu) + 1):length(theta$par)]))
+results</code></pre>
+<pre><code>##                         coef           SE           t
+## price_randcoef  0.6848405976 0.3635066580   1.8839836
+## li_randcoef     0.0353562962 0.2652945554   0.1332718
+## fit_princ      -2.3204201518 0.5473037880  -4.2397297
+## hp             -0.0060722995 0.0079454817  -0.7642456
+## we             -0.0002877069 0.0002422627  -1.1875826
+## li              0.2158372102 0.1536738298   1.4045151
+## sp             -0.0584869107 0.0059858391  -9.7708792
+## factor(cla)2    0.2787313377 0.0664528183   4.1944246
+## factor(cla)3    0.4906750402 0.0974344820   5.0359486
+## factor(cla)4    0.6057834890 0.1404201377   4.3140784
+## factor(cla)5    1.3921036580 0.1564453053   8.8983409
+## home            1.5967160018 0.0441607602  36.1568957
+## factor(brd)2    1.0384508234 0.1720094376   6.0371735
+## factor(brd)3    1.4820994419 0.1538369207   9.6342246
+## factor(brd)4    0.3680375088 0.1359869235   2.7064184
+## factor(brd)5   -1.5927102593 0.1565757917 -10.1721361
+## factor(brd)7    0.3195847209 0.1220482730   2.6185108
+## factor(brd)8    0.8925328274 0.1273970004   7.0059171
+## factor(brd)9    0.1054528394 0.1515002682   0.6960571
+## factor(brd)10  -0.3279833520 0.1453243665  -2.2569054
+## factor(brd)11  -1.0006982986 0.2927906251  -3.4177949
+## factor(brd)14  -0.3133721472 0.1164797585  -2.6903571
+## factor(brd)15  -0.3897715205 0.1319340128  -2.9542914
+## factor(brd)16   2.4883522278 0.1831107717  13.5893274
+## factor(brd)17  -0.6112177176 0.1379730790  -4.4299781
+## factor(brd)18   0.2529078864 0.1199155721   2.1090496
+## factor(brd)19   0.6014106079 0.1214000607   4.9539564
+## factor(brd)20   0.6530076960 0.1166524959   5.5978888
+## factor(brd)22   0.8111399553 0.1224895065   6.6221179
+## factor(brd)23  -0.3087123953 0.1303896386  -2.3676145
+## factor(brd)24   0.9734844747 0.1556356984   6.2548919
+## factor(brd)25  -0.4753077018 0.1473704535  -3.2252578
+## factor(brd)26  -0.3809965344 0.1675747229  -2.2735919
+## factor(brd)27  -2.1576405652 0.4113852099  -5.2448180
+## factor(brd)28  -1.0588143221 0.1555344504  -6.8075871
+## factor(brd)29   0.0931514168 0.1327729101   0.7015845
+## factor(brd)30   0.8780279465 0.1301769349   6.7448811
+## factor(brd)31   1.0204259015 0.1365738142   7.4716073
+## factor(brd)32  -1.4918202917 0.2990355396  -4.9887726
+## factor(brd)33  -0.2888874835 0.1536922996  -1.8796484
+## factor(brd)34  -1.5822453868 0.1795853565  -8.8105479
+## factor(brd)35   0.2155800145 0.1538050083   1.4016450
+## factor(brd)36  -0.2509171004 0.2527993645  -0.9925543
+## factor(brd)37  -0.4687282517 0.6077240210  -0.7712847
+## factor(brd)40   0.5928949537 0.4664107572   1.2711863
+## factor(brd)42  -0.2240311360 0.2452562024  -0.9134576
+## factor(brd)43  -0.3550653552 0.2981470333  -1.1909069
+## factor(brd)44  -0.6739582238 0.3987379827  -1.6902283
+## factor(brd)45  -0.6364187468 0.7221843299  -0.8812414
+## factor(brd)46   0.5499469691 0.1483361972   3.7074361
+## factor(brd)47  -0.7538761828 0.2503923745  -3.0107793</code></pre>
 </div>
 </div>
 
