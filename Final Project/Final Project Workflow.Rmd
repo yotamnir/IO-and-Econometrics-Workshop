@@ -1,0 +1,110 @@
+---
+title: "Final Project Workflow"
+author: "Yotam Nir"
+date: "23 7 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Loading packages and data
+
+Workflow remarks:
+
+1. Before importing the prices data, an excel edit was required – `text to columns` with "|" as a separator.
+
+2. The .csv files were renamed externally for convenience.
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  stringi   # for string operations (used here to reverse order of wrongly written model names)
+)
+
+# Downloaded on 21.07.2021.
+prices <- read.csv("Prices.csv") %>%
+  as_tibble() %>%
+  filter(
+    shnat_yitzur > 2016,   # no cars produced before 2017 in quantities data
+    sug_degem == "P"       # interested only in private and not commercial vehicles
+  ) %>%
+  select(-sug_degem)       # no longer informative
+
+# Downloaded on 21.06.2021
+quantities <- read.csv("Monthly 2018-2021.csv") %>%
+  as_tibble() %>%
+  filter(Sug.Degem == "P") %>%
+  select(-Sug.Degem)
+```
+
+### Combining and cleansing
+
+Joining by model number, model name (model numbers not unique across brands), manufacturing year, and producing country
+
+```{r}
+cars <- full_join(
+  quantities, prices,
+  by = c(
+    "Degem.Cd" = "degem_cd",
+    "Degem.Nm" = "degem_nm",
+    "Shnat.Yitzur" = "shnat_yitzur",
+    "Tozeret.Cd" = "tozeret_cd"
+  )
+) %>%
+  mutate(
+    merge = case_when(is.na(kinuy_mishari) ~ 1,   # quantity obs not matched
+                      is.na(ן..Make.ENG) ~ 2,     # price obs not matched
+                      TRUE ~ 3)                   # rest of the cases matched
+  )
+```
+
+Some of the model names in the quantities dataset were uploaded in reverse order (e.g. "cba" instead of "abc"). This is responsible for many of the 1,790 quantities observations that were not successfully matched. We therefore reverse the order of the names in the unmatched quantity observations and attempt to join again (we have verified that no two models are mirror spellings of each other):
+
+```{r}
+# Note: using only un-joined quantity observations
+reverse_quantities <- cars[which(cars$merge == 1), 1:length(quantities)] %>%
+  mutate(Degem.Nm = stri_reverse(Degem.Nm))
+
+reverse_join <- full_join(
+  reverse_quantities, prices,
+  by = c(
+    "Degem.Cd" = "degem_cd",
+    "Degem.Nm" = "degem_nm",
+    "Shnat.Yitzur" = "shnat_yitzur",
+    "Tozeret.Cd" = "tozeret_cd"
+  )
+) %>%
+  mutate(
+    merge = case_when(is.na(kinuy_mishari) ~ 1,   # quantity obs not matched
+                      is.na(ן..Make.ENG) ~ 2,     # price obs not matched
+                      TRUE ~ 3)                   # rest of the cases matched
+  ) %>%
+  filter(merge %in% c(1,3)) %>%
+  mutate(
+    Degem.Nm = case_when(merge == 1 ~ stri_reverse(Degem.Nm),  # return un-joined cases to their original names
+                         merge == 3 ~ Degem.Nm) # keeping joined cases with their correct names
+  )
+```
+
+1198 out of the 1790 previously unmatched cases were successfully joined, and we can now add them instead of their unmatched instances:
+
+```{r}
+cars <- cars %>%
+  filter(merge != 1) %>%
+  bind_rows(reverse_join)
+```
+
+
+The 592 remaining unmatched quantities have 80 different model names. It is possible to fix each case individually and add another 1.5% to our sample. Is this worth doing? Will it perhaps be a problem because they would enter the "outside option" of our market?
+
+
+
+
+
+```{r}
+cars %>% group_by(merge) %>% summarise(n = n())
+```
+

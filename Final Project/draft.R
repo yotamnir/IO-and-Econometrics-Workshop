@@ -1,12 +1,15 @@
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load(tidyverse, splitstackshape)
+pacman::p_load(
+  tidyverse,
+  stringi   # for string operations (used here to reverse order of wrongly written model names)
+)
 
 # Note – excel edit: text to columns with "|" as a separator, and file renamed. Excel downloaded on 21.07.2021.
 prices <- read.csv("Final Project/Prices.csv") %>%
   as_tibble() %>%
   filter(shnat_yitzur > 2016)   # no cars produced before 2017 in quantities data
 
-# Excel downloaded on
+# Excel downloaded on 21.06.2021
 quantities <- read.csv("Final Project/Monthly 2018-2021.csv") %>%
   as_tibble()
 
@@ -14,7 +17,7 @@ quantities <- read.csv("Final Project/Monthly 2018-2021.csv") %>%
 # Note: prices are unique on the variable list:
 # degem_cd degem_nm shnat_yitzur sug_degem tozeret_cd
 
-combined <- full_join(
+cars <- full_join(
   quantities, prices,
   by = c(
     "Degem.Cd" = "degem_cd",
