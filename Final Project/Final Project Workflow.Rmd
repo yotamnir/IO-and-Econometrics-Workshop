@@ -17,11 +17,12 @@ Workflow remarks:
 
 2. The .csv files were renamed externally for convenience.
 
-```{r}
+```{r, message=FALSE}
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(
   tidyverse,
-  stringi   # for string operations (used here to reverse order of wrongly written model names)
+  stringi,   # for string operations (used here to reverse order of wrongly written model names)
+  BLPestimatoR   # for BLP estimation
 )
 
 # Downloaded on 21.07.2021.
@@ -98,13 +99,33 @@ cars <- cars %>%
 ```
 
 
-The 592 remaining unmatched quantities have 80 different model names. It is possible to fix each case individually and add another 1.5% to our sample. Is this worth doing? Will it perhaps be a problem because they would enter the "outside option" of our market?
+The 592 remaining unmatched quantities have 80 different model names. It is possible to fix each case individually and add another 1.5% to our sample. **Is this worth doing? Will it perhaps be a problem because they would enter the "outside option" of our market?**
 
 
+The following block creates the market sizes, market shares, and outside option shares.
 
-
+**NOT YET AGGREGATED TO QUARTERS**
 
 ```{r}
-cars %>% group_by(merge) %>% summarise(n = n())
+cars <- cars %>%
+  mutate(
+    year = as.factor(substr(Date, nchar(Date) - 3, nchar(Date))),
+    month = as.numeric(as.factor(substr(Date, 1, 2))),
+    marketsize = case_when(year == 2018 ~ 4266307,
+                           year == 2019 ~ 4405446,
+                           year == 2020 ~ 4508457,
+                           year == 2021 ~ 4508457 * 1.01),
+    sj = Car.num / marketsize
+  ) %>%
+  group_by(year) %>%
+  mutate(s0 = 1 - sum(sj))
 ```
+
+
+
+
+
+
+
+### BLP Demand Estimation
 
