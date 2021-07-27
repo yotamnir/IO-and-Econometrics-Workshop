@@ -21,7 +21,11 @@ Workflow remarks:
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(
   tidyverse,
-  stringi,   # for string operations (used here to reverse order of wrongly written model names)
+  doBy,
+  reshape2,
+  data.table,
+  fixest,        # for convenient estimation of fixed effects and IV regressions and clustering
+  matsindf,      # for "group_by_everthing_except" function
   BLPestimatoR   # for BLP estimation
 )
 
@@ -43,89 +47,195 @@ quantities <- read.csv("Monthly 2018-2021.csv") %>%
 
 ### Combining and cleansing
 
-Joining by model number, model name (model numbers not unique across brands), manufacturing year, and producing country
+Joining by model number, manufacturing year, and producing country
 
 ```{r}
 cars <- full_join(
   quantities, prices,
   by = c(
     "Degem.Cd" = "degem_cd",
-    "Degem.Nm" = "degem_nm",
     "Shnat.Yitzur" = "shnat_yitzur",
     "Tozeret.Cd" = "tozeret_cd"
   )
 ) %>%
-  mutate(
-    merge = case_when(is.na(kinuy_mishari) ~ 1,   # quantity obs not matched
-                      is.na(ן..Make.ENG) ~ 2,     # price obs not matched
-                      TRUE ~ 3)                   # rest of the cases matched
-  )
-```
-
-Some of the model names in the quantities dataset were uploaded in reverse order (e.g. "cba" instead of "abc"). This is responsible for many of the 1,790 quantities observations that were not successfully matched. We therefore reverse the order of the names in the unmatched quantity observations and attempt to join again (we have verified that no two models are mirror spellings of each other):
-
-```{r}
-# Note: using only un-joined quantity observations
-reverse_quantities <- cars[which(cars$merge == 1), 1:length(quantities)] %>%
-  mutate(Degem.Nm = stri_reverse(Degem.Nm))
-
-reverse_join <- full_join(
-  reverse_quantities, prices,
-  by = c(
-    "Degem.Cd" = "degem_cd",
-    "Degem.Nm" = "degem_nm",
-    "Shnat.Yitzur" = "shnat_yitzur",
-    "Tozeret.Cd" = "tozeret_cd"
-  )
-) %>%
-  mutate(
-    merge = case_when(is.na(kinuy_mishari) ~ 1,   # quantity obs not matched
-                      is.na(ן..Make.ENG) ~ 2,     # price obs not matched
-                      TRUE ~ 3)                   # rest of the cases matched
-  ) %>%
-  filter(merge %in% c(1,3)) %>%
-  mutate(
-    Degem.Nm = case_when(merge == 1 ~ stri_reverse(Degem.Nm),  # return un-joined cases to their original names
-                         merge == 3 ~ Degem.Nm) # keeping joined cases with their correct names
-  )
-```
-
-1198 out of the 1790 previously unmatched cases were successfully joined, and we can now add them instead of their unmatched instances:
-
-```{r}
-cars <- cars %>%
-  filter(merge != 1) %>%
-  bind_rows(reverse_join)
+  filter(!is.na(kinuy_mishari), !is.na(ן..Make.ENG)) %>%
+  select(-Degem.Nm, -degem_nm, -Kinuy.Mishari, -kinuy_mishari)
 ```
 
 
-The 592 remaining unmatched quantities have 80 different model names. It is possible to fix each case individually and add another 1.5% to our sample. **Is this worth doing? Will it perhaps be a problem because they would enter the "outside option" of our market?**
+Next, we join together some incorrectly separated rows (exact same model, same production line, same production year), and then also aggregate model sales by quarter (currently by month):
 
-
-The following block creates the market sizes, market shares, and outside option shares.
-
-**NOT YET AGGREGATED TO QUARTERS**
-
-```{r}
+```{r, message=FALSE}
 cars <- cars %>%
   mutate(
     year = as.factor(substr(Date, nchar(Date) - 3, nchar(Date))),
     month = as.numeric(as.factor(substr(Date, 1, 2))),
+    quarter = case_when(month %in% c(1,2,3) ~ 1,
+                        month %in% c(4,5,6) ~ 2,
+                        month %in% c(7,8,9) ~ 3,
+                        month %in% c(10,11,12) ~ 4)
+  ) %>%
+  group_by_everything_except("Car.num", "Car.num.prec", "month", "Date", "Sgira.Date") %>%
+  summarise(Car.num = sum(Car.num),
+            Car.num.prec = sum(Car.num.prec)) %>%
+  ungroup() %>%
+  filter(!is.na(quarter))
+```
+
+
+The following block creates the market sizes (by number of licensed drivers; estimated in 2021), market shares, and outside option shares.
+
+```{r}
+cars <- cars %>%
+  mutate(
     marketsize = case_when(year == 2018 ~ 4266307,
                            year == 2019 ~ 4405446,
                            year == 2020 ~ 4508457,
                            year == 2021 ~ 4508457 * 1.01),
     sj = Car.num / marketsize
   ) %>%
-  group_by(year) %>%
-  mutate(s0 = 1 - sum(sj))
+  group_by(year, quarter) %>%
+  mutate(s0 = 1 - sum(sj)) %>%
+  ungroup()
+```
+
+Here we add the exchange rate data, retrieved from [BOI](https://www.boi.org.il/he/Markets/ExchangeRates/Pages/Default.aspx). Since data is daily we create an average monthly rate.
+
+**should think about it with Alon, kept quarterly for now** 
+
+```{r, message=FALSE}
+# Read and arrange exchange rates data
+ExchangeRates <- read.csv("ExchangeRates.csv") %>%
+  rename(date = ן..date) %>%
+  mutate(
+    date = as.Date(date,"%d/%m/%Y"),
+    month = as.numeric((substr(date,6,7))),
+    year = as.factor(substr(date,1,4)),
+    quarter =  case_when(month %in% c(1,2,3) ~ 1,
+                        month %in% c(4,5,6) ~ 2,
+                        month %in% c(7,8,9) ~ 3,
+                        month %in% c(10,11,12) ~ 4)
+  ) %>%
+  select(-date, -month) %>%
+  group_by(year, quarter) %>%
+  summarise(
+    USD = mean(USD),
+    Yen=mean(Yen),
+    Euro = mean(Euro),
+    Pound = mean(Pound)
+  ) %>%
+  ungroup()
+
+# Reshape from wide to long before merging
+long <- melt(
+  setDT(ExchangeRates),
+  id.vars = c("year", "quarter"),
+  variable.name = "currency"
+) %>%
+  rename(ExchangeRate = value)
+
+# Creating a currency variable to merge on in the cars data
+cars <- cars %>% mutate(
+  currency = case_when(
+    Country.of.Origin %in% c("Thailand", "Mexico", "United States", "India",
+                             "Morocco", "China", "Soutch Korea", "Canada",
+                             "South Africa") ~ "USD",
+    Country.of.Origin %in% c("Portugal", "Germany", "Slovakia", "France",
+                             "Italy", "Spain", "Hungary", "Turkey",
+                             "Poland", "Czech Republic", "Romania", "Sweden",
+                             "Belgium", "Netherlands", "Austria", "Slovenia",
+                             "Serbia") ~ "Euro",
+    Country.of.Origin == "UK" ~ "Pound",
+    Country.of.Origin == "Japan" ~ "Yen"
+  )
+)
+
+# Merging the exchange rates to the cars data, and adjusting prices for inflation (no dependence between the two steps): 2010 = 1, taking March CPI for 2021
+cars <- merge(cars,long) %>%
+  mutate(
+    const_price = case_when(year == 2018 ~ mehir/1.07271,
+                            year == 2019 ~ mehir/1.08176,
+                            year == 2020 ~ mehir/1.0754,
+                            year == 2021 ~ mehir/1.081515)
+  )
+```
+
+
+### BLP Demand Estimation
+
+Car attributes X:
+
+* const_price: price variable
+* hp_weight: horsepower relative to weight, as in BLP (1995)
+* Madad.Yarok: how environmentally-friendly the car is
+* Nikud.Betihut: how safe the car is
+* trend (year variable) **should be factor and not numeric?**
+* 
+
+Random coefficients
+
+*const_price
+*
+*
+
+Instruments:
+
+* ExchangeRate
+* number of competitors in the segment
+* average car attributes of the competitors
+
+
+Here we create our initial guess of $\delta^0$ as well as additional variables that will enter the GMM function (either as regular variables or as instruments):
+
+```{r}
+cars <- cars %>% mutate(
+  delta0 = log(sj)-log(s0),
+  hp_weight = Koah.Sus/Mishkal.Kolel,
+  trend = as.numeric(year)
+)
+```
+
+
+
+Here we create objects for BLP estimation. The formula is split into four parts by "|" – linear variables, exogenous variables, random coefficients, and instruments.
+
+
+**CURRENTLY INCOMPLETE**
+
+```{r}
+# Formula
+model <- as.formula("sj ~ const_price + hp_weight + Madad.Yarok + Nikud.Betihut |
+                    hp_weight + Madad.Yarok + Nikud.Betihut |
+                    const_price |
+                    ExchangeRate")
+# Creating product and market IDs
+market_id <- cars %>% group_by(year, quarter) %>%
+  summarise(n = NA) %>% select(-n)
+market_id$market_id <- as.numeric(rownames(market_id))
+cars <- full_join(cars, market_id)
+product_id <- cars %>% group_by(Shnat.Yitzur, Tozeret.Cd, Degem.Cd) %>%
+  summarise(n = NA) %>% select(-n)
+product_id$product_id <- as.numeric(rownames(product_id))
+cars <- full_join(cars, product_id)
+
+
+BLPdata <- BLP_data(
+  model = model,
+  market_identifier = "market_id",
+  productData = cars,
+  product_identifier = "product_id",
+  par_delta = "delta0",
+  blp_inner_tol = 1e-6,
+  blp_inner_maxit = 5000
+)
 ```
 
 
 
 
+FOR OWN REFERENCE
 
-
-
-### BLP Demand Estimation
+```{r, message=FALSE}
+view(cars %>% group_by(Car.num) %>% summarise(n = n()) %>% mutate(cdf = cumsum(n) / sum(n)))
+```
 
