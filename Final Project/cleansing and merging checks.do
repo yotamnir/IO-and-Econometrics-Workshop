@@ -50,4 +50,5 @@ duplicates tag degemcd degemnm shnatyitzur sugdegem tozeretcd year month, gen(ta
 merge m:1 degemcd degemnm shnatyitzur sugdegem tozeretcd using "C:\Users\user\Dropbox\תשפא\IO and Econometrics Workshop\IO-and-Econometrics-Workshop\Final Project\Prices.dta"
 	sort shnatyitzur tozeretcd degemcd sugdegem
 
+drop if sugdegem == "M"
 drop if kinuymishari == "2008" & shnatyitzur == 2017	// none in master

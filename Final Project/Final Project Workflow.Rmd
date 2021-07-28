@@ -21,11 +21,11 @@ Workflow remarks:
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(
   tidyverse,
-  doBy,
-  reshape2,
-  data.table,
+  doBy,          # for group-wise data adjustments
+  reshape2,      # for data adjustments
+  data.table,    # for data adjustments
   fixest,        # for convenient estimation of fixed effects and IV regressions and clustering
-  matsindf,      # for "group_by_everthing_except" function
+  matsindf,      # for "group_by_everything_except" function
   BLPestimatoR   # for BLP estimation
 )
 
@@ -58,7 +58,8 @@ cars <- full_join(
     "Tozeret.Cd" = "tozeret_cd"
   )
 ) %>%
-  filter(!is.na(kinuy_mishari), !is.na(ן..Make.ENG)) %>%
+  rename(Make.ENG = ן..Make.ENG) %>%
+  filter(!is.na(kinuy_mishari), !is.na(Make.ENG)) %>%
   select(-Degem.Nm, -degem_nm, -Kinuy.Mishari, -kinuy_mishari)
 ```
 
@@ -99,7 +100,7 @@ cars <- cars %>%
   ungroup()
 ```
 
-Here we add the exchange rate data, retrieved from [BOI](https://www.boi.org.il/he/Markets/ExchangeRates/Pages/Default.aspx). Since data is daily we create an average monthly rate.
+Here we add the exchange rate data, retrieved from [BOI](https://www.boi.org.il/he/Markets/ExchangeRates/Pages/Default.aspx). Since data is daily we create an average yearly rate, in line with the frequency of our price variable. We also adjust prices for inflation (base = 2010) and divide by 1000 for easier interpretation of the coefficients.
 
 **should think about it with Alon, kept quarterly for now** 
 
@@ -117,7 +118,7 @@ ExchangeRates <- read.csv("ExchangeRates.csv") %>%
                         month %in% c(10,11,12) ~ 4)
   ) %>%
   select(-date, -month) %>%
-  group_by(year, quarter) %>%
+  group_by(year) %>%      # Taking the yearly average exchange rate:
   summarise(
     USD = mean(USD),
     Yen=mean(Yen),
@@ -129,7 +130,7 @@ ExchangeRates <- read.csv("ExchangeRates.csv") %>%
 # Reshape from wide to long before merging
 long <- melt(
   setDT(ExchangeRates),
-  id.vars = c("year", "quarter"),
+  id.vars = c("year"),
   variable.name = "currency"
 ) %>%
   rename(ExchangeRate = value)
@@ -150,92 +151,154 @@ cars <- cars %>% mutate(
   )
 )
 
-# Merging the exchange rates to the cars data, and adjusting prices for inflation (no dependence between the two steps): 2010 = 1, taking March CPI for 2021
+# Merging the exchange rates to the cars data, and adjusting prices for inflation (no dependence between the two steps): 2010 = 1000, taking March CPI for 2021
 cars <- merge(cars,long) %>%
   mutate(
-    const_price = case_when(year == 2018 ~ mehir/1.07271,
-                            year == 2019 ~ mehir/1.08176,
-                            year == 2020 ~ mehir/1.0754,
-                            year == 2021 ~ mehir/1.081515)
+    const_price = case_when(year == 2018 ~ mehir/1072.71,
+                            year == 2019 ~ mehir/1081.76,
+                            year == 2020 ~ mehir/1075.4,
+                            year == 2021 ~ mehir/1081.515)
   )
 ```
 
 
 ### BLP Demand Estimation
 
+#### Variables, Random Coefficients, and Instruments
+
 Car attributes X:
 
 * const_price: price variable
 * hp_weight: horsepower relative to weight, as in BLP (1995)
-* Madad.Yarok: how environmentally-friendly the car is
+* Kvutzat.Zihum: how environmentally-friendly the car is
 * Nikud.Betihut: how safe the car is
-* trend (year variable) **should be factor and not numeric?**
+* Mispar.Moshavim: number of seats, in 3 categories: 2-4; 5; 6-9
+* Car types (merkavgrouped): model types, in categories:(Cabriolet, Coupe), (Combi, MPV), then each by itself
+* Hybrid: 2 categories: fuel ignition and the rest (hybrid, electric, plug in)
+* Brand fixed effects (also Korea fixed effect?)
+* trend: since our markets are only defined over time, we can use market_id for this
 * 
 
 Random coefficients
 
-*const_price
-*
-*
+* const_price
+* Seats 6-9
+* Kvutzat.Zihum
 
 Instruments:
 
 * ExchangeRate
-* number of competitors in the segment
-* average car attributes of the competitors
+* Number of competitors in the segment
+* Average Koah.Sus and Nikud.Betihut of the competitors within the segment
+* Producing country's producer price index
 
 
 Here we create our initial guess of $\delta^0$ as well as additional variables that will enter the GMM function (either as regular variables or as instruments):
 
 ```{r}
-cars <- cars %>% mutate(
+cars <- cars %>%
+  group_by(year, quarter) %>%       # CREATING MARKET ID:
+  mutate(market_id = cur_group_id()) %>%
+  ungroup() %>%
+  group_by(Shnat.Yitzur, Tozeret.Cd, Degem.Cd) %>%  # CREATING PRODUCT ID:
+  mutate(product_id = cur_group_id()) %>%
+  ungroup() %>%     # CREATING VARIABLES TO BE USED IN BLP ESTIMATION:
+  mutate(
   delta0 = log(sj)-log(s0),
   hp_weight = Koah.Sus/Mishkal.Kolel,
-  trend = as.numeric(year)
-)
+  seats = case_when(Mispar.Moshavim < 5  ~ "less than 5 seats",
+                    Mispar.Moshavim == 5 ~ "5 seats",
+                    Mispar.Moshavim > 5  ~ "more than 5 seats"),
+  merkavgrouped = case_when(Merkav %in% c("Cabriolet", "Coupe") ~ "Cabriolet/Coupe",
+                      Merkav %in% c("Combi", "MPV") ~ "Combi/MPV",
+                      TRUE ~ Merkav),
+  hybrid = ifelse(Technologiat.Hanaa.Nm == "Fuel Ignition", 0, 1),
+) %>%
+  group_by(merkavgrouped, hybrid) %>%     # CREATING MARKET SEGMENTS:
+  mutate(segment = cur_group_id()) %>%
+  ungroup() %>%
+  group_by(segment, year, quarter) %>%    # CREATING MARKET-SEGMENT DEPENDENT INSTRUMENTS:
+  mutate(
+    compet_num = n(),
+    compet_hp = (sum(Koah.Sus) - Koah.Sus) / (n() - 1),
+    compet_safety = (sum(Nikud.Betihut, na.rm = TRUE) - Nikud.Betihut) / (n() - 1)
+  ) %>%
+  ungroup()
 ```
 
 
+#### BLP
 
-Here we create objects for BLP estimation. The formula is split into four parts by "|" – linear variables, exogenous variables, random coefficients, and instruments.
-
-
-**CURRENTLY INCOMPLETE**
+Here we specify the model for BLP estimation, and create the `BLP_data` object based on it. The formula is split into four parts by "|" – linear variables, exogenous variables, random coefficients, and instruments.
 
 ```{r}
-# Formula
-model <- as.formula("sj ~ const_price + hp_weight + Madad.Yarok + Nikud.Betihut |
-                    hp_weight + Madad.Yarok + Nikud.Betihut |
-                    const_price |
-                    ExchangeRate")
-# Creating product and market IDs
-market_id <- cars %>% group_by(year, quarter) %>%
-  summarise(n = NA) %>% select(-n)
-market_id$market_id <- as.numeric(rownames(market_id))
-cars <- full_join(cars, market_id)
-product_id <- cars %>% group_by(Shnat.Yitzur, Tozeret.Cd, Degem.Cd) %>%
-  summarise(n = NA) %>% select(-n)
-product_id$product_id <- as.numeric(rownames(product_id))
-cars <- full_join(cars, product_id)
+# Creating separate dummies for number of seats so that we can include a random coefficient only for the 6-9 category (reference category is seats = 5:
+cars <- cars %>%
+  mutate(
+    seats1 = as.numeric(Mispar.Moshavim < 5),
+    seats2 = as.numeric(Mispar.Moshavim > 5)
+  )
 
+# Taking only the variables that will be used and filtering out observations with missing data (required for `BLP_data`). Also deleting 26 observations which are the exact same model but have slight differences such that it is not clear whether these differences are documenting mistakes or not (required for the combination of market_id and product_id to be unique).
+productData <- cars %>%
+  select(year, quarter, delta0, s0, sj, const_price, hp_weight, Kvutzat.Zihum, Nikud.Betihut, seats1, seats2, segment, Make.ENG, market_id, product_id, ExchangeRate, starts_with("compet_")) %>%
+  na.omit() %>%   # note: 2,543 observations were dropped, bringing the total down to 21,495
+  group_by(market_id, product_id) %>%
+  mutate(n = n()) %>%
+  filter(n == 1) %>%
+  select(-n) %>%
+  ungroup()   # remaining observations: 21,469
+
+# Formula
+model <- as.formula("sj ~ const_price + hp_weight + Kvutzat.Zihum + Nikud.Betihut + seats1 + seats2 + factor(segment) + factor(Make.ENG) + market_id |
+                    hp_weight + Kvutzat.Zihum + Nikud.Betihut + seats1 + seats2 + factor(segment) + factor(Make.ENG) + market_id |
+                    const_price + seats2 + Kvutzat.Zihum |
+                    ExchangeRate + compet_num + compet_hp + compet_safety")
 
 BLPdata <- BLP_data(
   model = model,
   market_identifier = "market_id",
-  productData = cars,
+  productData = productData,
   product_identifier = "product_id",
   par_delta = "delta0",
+  integration_method = "MLHS",
+  integration_accuracy = 1000,
   blp_inner_tol = 1e-6,
   blp_inner_maxit = 5000
 )
 ```
 
 
+Next we run a simple logit model with the purpose of using its standard errors, where relevant, as a starting guess for $\theta_2$ in the BLP estimation.
+
+```{r}
+logit_model <- feols(log(sj) - log(s0) ~ hp_weight + Kvutzat.Zihum + Nikud.Betihut + seats1 + seats2 + factor(segment) + factor(Make.ENG) + market_id | const_price ~ ExchangeRate + compet_num + compet_hp + compet_safety, productData)
+
+theta2_guess <- as.matrix(logit_model$se)
+
+# Renaming row and column names as required by the estimateBLP function
+rownames(theta2_guess)[2] <- "const_price"
+colnames(theta2_guess) <- "unobs_sd"
+
+# Changing all random coefficients assumed to be 0 to NA, as required by estimateBLP
+theta2_guess[-c(2, 4, 7),] <- NA
+```
 
 
-FOR OWN REFERENCE
+Finally, we can run the BLP estimation:
 
-```{r, message=FALSE}
-view(cars %>% group_by(Car.num) %>% summarise(n = n()) %>% mutate(cdf = cumsum(n) / sum(n)))
+**CURRENTLY NOT WORKING: SEE 'ESTIMATION' SECTION OF <https://cran.r-project.org/web/packages/BLPestimatoR/vignettes/blp_intro.html>**
+
+```{r}
+BLP <- estimateBLP(
+  blp_data = BLPdata,
+  par_theta2 = theta2_guess,
+  solver_method = "BFGS",
+  solver_maxit = 1000,   # default, can be changed
+  solver_reltol = 1e-6,  # default, can be changed
+  standardError = "heteroskedastic",
+  extremumCheck = TRUE,  # default is FALSE, might want to change
+  printLevel = 1
+)
 ```
 
