@@ -1,0 +1,535 @@
+---
+title: "Final Project Workflow"
+author: "Shira Buzaglo and Yotam Nir"
+date: "23.7.2021"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Loading packages and data preparation
+
+Workflow remarks:
+
+1. Before importing the prices data, an excel edit was required – `text to columns` with `|` as a separator.
+
+2. The .csv files were renamed externally for convenience.
+
+```{r, message=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  doBy,          # for group-wise data adjustments
+  reshape2,      # for data adjustments
+  data.table,    # for data adjustments
+  fixest,        # for convenient estimation of fixed effects and IV regressions and clustering
+  matsindf,      # for "group_by_everything_except" function
+  BLPestimatoR,  # for BLP estimation
+  Rcpp,          # required for BLPestimatoR
+  fastDummies    # for conveniently turning categorical variables into dummies
+)
+
+# Downloaded on 21.07.2021.
+prices <- read.csv("Prices.csv") %>%
+  as_tibble() %>%
+  filter(
+    shnat_yitzur > 2016,   # no cars produced before 2017 in quantities data
+    sug_degem == "P"       # interested only in private and not commercial vehicles
+  ) %>%
+  select(-sug_degem)       # no longer informative
+
+# Downloaded on 21.06.2021
+quantities <- read.csv("Monthly 2018-2021.csv") %>%
+  as_tibble() %>%
+  filter(Sug.Degem == "P") %>%
+  select(-Sug.Degem)
+
+# Fixing a small spelling mistake
+quantities$Country.of.Origin[which(quantities$Country.of.Origin == "Soutch Korea")] <- "South Korea"
+```
+
+
+Here we join quantity and price data by model number, manufacturing year, and producing country:
+
+```{r}
+cars <- full_join(
+  quantities, prices,
+  by = c(
+    "Degem.Cd" = "degem_cd",
+    "Shnat.Yitzur" = "shnat_yitzur",
+    "Tozeret.Cd" = "tozeret_cd"
+  )
+) %>%
+  rename(Make.ENG = ן..Make.ENG) %>%
+  filter(!is.na(kinuy_mishari), !is.na(Make.ENG)) %>%
+  select(-Degem.Nm, -degem_nm, -Kinuy.Mishari, -kinuy_mishari)
+```
+
+
+Next, we join together some incorrectly separated rows (exact same model, same production line, same production year), and at the same time also aggregate model sales by quarter (currently by month):
+
+```{r group_by_everything_except, message=FALSE}
+cars <- cars %>%
+  mutate(
+    year = as.factor(substr(Date, nchar(Date) - 3, nchar(Date))),
+    month = as.numeric(as.factor(substr(Date, 1, 2))),
+    quarter = case_when(month %in% c(1,2,3) ~ 1,
+                        month %in% c(4,5,6) ~ 2,
+                        month %in% c(7,8,9) ~ 3,
+                        month %in% c(10,11,12) ~ 4)
+  ) %>%
+  group_by_everything_except("Car.num", "Car.num.prec", "month", "Date", "Sgira.Date") %>%
+  summarise(Car.num = sum(Car.num),
+            Car.num.prec = sum(Car.num.prec)) %>%
+  ungroup() %>%
+  filter(!is.na(quarter))
+```
+
+
+Here we add the exchange rate data, retrieved from [BOI](https://www.boi.org.il/he/Markets/ExchangeRates/Pages/Default.aspx). Since data is daily we create an average yearly rate, in line with the frequency of our price variable. We also adjust prices for inflation (base = 2010) and divide by 1000 for easier interpretation of the coefficients.
+
+
+```{r, message=FALSE}
+# Read and arrange exchange rates data
+ExchangeRates <- read.csv("ExchangeRates.csv") %>%
+  rename(date = ן..date) %>%
+  mutate(
+    date = as.Date(date,"%d/%m/%Y"),
+    month = as.numeric((substr(date,6,7))),
+    year = as.factor(substr(date,1,4)),
+    quarter =  case_when(month %in% c(1,2,3) ~ 1,
+                        month %in% c(4,5,6) ~ 2,
+                        month %in% c(7,8,9) ~ 3,
+                        month %in% c(10,11,12) ~ 4)
+  ) %>%
+  select(-date, -month) %>%
+  group_by(year) %>%      # Taking the yearly average exchange rate:
+  summarise(
+    USD = mean(USD),
+    Yen=mean(Yen),
+    Euro = mean(Euro),
+    Pound = mean(Pound)
+  ) %>%
+  ungroup()
+
+# Reshape from wide to long before merging
+long <- melt(
+  setDT(ExchangeRates),
+  id.vars = c("year"),
+  variable.name = "currency"
+) %>%
+  rename(ExchangeRate = value)
+
+# Creating a currency variable to merge on in the cars data
+cars <- cars %>% mutate(
+  currency = case_when(
+    Country.of.Origin %in% c("Thailand", "Mexico", "United States", "India",
+                             "Morocco", "China", "South Korea", "Canada",
+                             "South Africa") ~ "USD",
+    Country.of.Origin %in% c("Portugal", "Germany", "Slovakia", "France",
+                             "Italy", "Spain", "Hungary", "Turkey",
+                             "Poland", "Czech Republic", "Romania", "Sweden",
+                             "Belgium", "Netherlands", "Austria", "Slovenia",
+                             "Serbia") ~ "Euro",
+    Country.of.Origin == "UK" ~ "Pound",
+    Country.of.Origin == "Japan" ~ "Yen"
+  )
+)
+
+# Merging the exchange rates to the cars data, and adjusting prices for inflation (no dependence between the two steps): 2010 = 1000, taking March CPI for 2021
+cars <- merge(cars,long) %>%
+  mutate(
+    const_price = case_when(year == 2018 ~ mehir/1072.71,
+                            year == 2019 ~ mehir/1081.76,
+                            year == 2020 ~ mehir/1075.4,
+                            year == 2021 ~ mehir/1081.515)
+  )
+```
+
+
+Next, we add a variable specifying which countries are subject to customs duty (in our period of observation this is constant per country):
+
+```{r}
+cars <- cars %>%
+  mutate(
+    CustomsDuty = case_when(
+      Country.of.Origin %in% c("Japan", "China", "India", "South Korea",
+                               "South Africa", "Thailand", "Morocco") ~ 0.07,
+      TRUE ~ 0
+    )
+  )
+```
+
+
+Another variable we will use as an instrument is GDP growth, reflecting the economic conditions in the country of origin at the time of production. Data retrieved from [World Bank](https://data.worldbank.org/indicator/NY.GDP.MKTP.KD.ZG?end=2020&locations=AT-BE-CA-CN-CZ-FR-HU-DE-IN-IT-JP-MX-MA-NL-PL-PT-RO-RS-SK-SI-ZA-KR-ES-SE-TH-TR-GB-US&start=2016&view=chart), [OECD data](https://data.oecd.org/gdp/quarterly-gdp.htm) and some missing countries were added manually (Morocco, Thailand and Serbia in the first quarter of 2021).
+
+```{r}
+growth <- read.csv("GDPgrowth.csv") %>% 
+          select(-X2016) %>% rename(Country.of.Origin = ן..Country.of.Origin,
+                                    X2021 = X2021Q1)
+long <- melt(
+  setDT(growth),
+  id.vars = c("Country.of.Origin"),
+  variable.name = "year"
+) %>%
+  rename(growth = value) %>% 
+  mutate(Shnat.Yitzur = as.numeric(substr(year, 2, 5))) %>%
+  select(-year)
+# adjust some of the countries names to fit our data
+long$Country.of.Origin[which(long$Country.of.Origin == "Korea, Rep.")] <- "South Korea"
+long$Country.of.Origin[which(long$Country.of.Origin == "United Kingdom")] <- "UK"
+long$Country.of.Origin[which(long$Country.of.Origin == "Slovak Republic")] <- "Slovakia"
+# merge to cars
+cars <- merge(cars,long)
+```
+
+
+### Variables, Random Coefficients, and Instruments
+
+##### Car attributes X:
+
+* `const_price`: price variable, adjusted for inflation.
+* `hp_weight`: horsepower relative to weight, as in BLP (1995).
+* `Kvutzat.Zihum`: how environmentally-friendly the car is. A higher score means that the car is more polluting – such cars are taxed more heavily since the Green Tax reform.
+* `Nikud.Betihut`: how safe the car is. A recent tax reform on cars gives tax benefits to safer cars.
+* `Mispar.Moshavim`: number of seats, in 3 categories: 2-4; 5; 6-9
+* `segment`: model types, in categories and separated by whether they use fuel or hybrid/electric ignition.
+  * Model types (`merkavgrouped`): (Cabriolet, Coupe); (Combi, MPV); SUV: Hatchback; Sedan; Station.
+  * `hybrid`: 2 categories – fuel ignition and the rest (hybrid, electric, plug in)
+* Brand fixed effects: capturing unique brand-level tastes and other unobserved brand-level noise, following Nevo (2001).
+* Trend: since our markets are only defined over time, we can use `market_id` for this.
+
+##### Random coefficients
+
+* `const_price`
+* `hp_weight`
+* `Kvutzat.Zihum`
+* `seats2` – category of cars with 6-9 seats
+
+##### Instruments:
+
+* `ExchangeRate` and `ExchangeRate` squared.
+* `CustomsDuty`: customs rate for importing from the car's country of origin
+* `compet_num`: number of competitors in the segment.
+* `compet_hp` and `compet_safety`: average `Koah.Sus` (horsepower) and `Nikud.Betihut` (safety rating) of the competitors within the segment.
+* `ExchangeRate x CustomsDuty`
+* `ExchangeRate x compet_num`
+* `growth`
+
+
+Here we create the still-missing variables that will enter the GMM function (either as regular variables or as instruments):
+
+```{r}
+cars <- cars %>%
+  group_by(year, quarter) %>%       # Creating market ID:
+  mutate(market_id = cur_group_id()) %>%
+  ungroup() %>%
+  group_by(Shnat.Yitzur, Tozeret.Cd, Degem.Cd) %>%  # Creating product ID:
+  mutate(product_id = cur_group_id()) %>%
+  ungroup() %>%         # Creating variables to be used in BLP estimation:
+  mutate(
+  hp_weight = Koah.Sus/Mishkal.Kolel,
+  seats = case_when(Mispar.Moshavim < 5  ~ "less than 5 seats",
+                    Mispar.Moshavim == 5 ~ "5 seats",
+                    Mispar.Moshavim > 5  ~ "more than 5 seats"),
+  merkavgrouped = case_when(Merkav %in% c("Cabriolet", "Coupe") ~ "Cabriolet/Coupe",
+                      Merkav %in% c("Combi", "MPV") ~ "Combi/MPV",
+                      TRUE ~ Merkav),
+  hybrid = ifelse(Technologiat.Hanaa.Nm == "Fuel Ignition", 0, 1),
+) %>%
+  group_by(merkavgrouped, hybrid) %>%     # Creating market segments:
+  mutate(segment = cur_group_id()) %>%
+  ungroup() %>%
+  group_by(segment, year, quarter) %>%    # Creating market-segment dependent instruments:
+  mutate(
+    compet_num = n(),
+    compet_hp = (sum(Koah.Sus) - Koah.Sus) / (n() - 1),
+    compet_safety = (sum(Nikud.Betihut, na.rm = TRUE) - Nikud.Betihut) / (n() - 1)
+  ) %>%
+  ungroup()
+```
+
+
+### Summary Statistics
+
+Before subsetting the sample and running the estimation, the following code creates Figure 1 and Figure 2 in our paper:
+
+``` {r, message=FALSE}
+
+# Figure 1: Graph of aggregate sales per market_id
+data_figure1 <- cars[order(cars$market_id),]
+data_figure1 <- data_figure1 %>%
+  select(market_id,Car.num,year,quarter) %>%
+  mutate(Quarter = paste(quarter,year, sep="-")) %>%
+  filter(!is.na(Car.num))%>%
+  group_by(market_id,Quarter)%>%
+  summarise(sales=sum(Car.num)) %>%
+  ungroup()
+
+(figure1 <- ggplot(data_figure1, aes(x = fct_reorder(Quarter, market_id, .desc = FALSE), y = sales, group = 1)) +
+  geom_line() +
+  xlab("Quarters") +
+  ylab("Aggregate Sales") +
+  ggtitle("Figure 1: Aggregate sales by quarter, 2018-2021"))
+
+# Figure 2: Distribution of Country.of.Origin each - should we pick some aggregated brand variable instead?
+europe <- unique(cars$Country.of.Origin)
+europe <- europe[!europe %in% c("Thailand","Japan","South Korea","United States","China", "India","Mexico","Morocco","Canada","South Africa","Turkey")]
+data_figure2 <- cars %>%
+  select(year, Car.num, Country.of.Origin, Make.ENG) %>%
+  filter(!is.na(Car.num))%>%
+  mutate(
+    origin_group = case_when(Country.of.Origin %in% europe ~ "European Countries",
+                             Country.of.Origin == "Turkey" ~ "Turkey",
+                             Country.of.Origin == "United States" ~ "United States",
+                             Country.of.Origin == "Japan" ~ "Japan",
+                             Country.of.Origin == "China" ~ "China",
+                             Country.of.Origin == "South Korea" ~ "South Korea",
+                             TRUE ~ "Others")
+  ) %>%
+  group_by(year, origin_group) %>%
+  summarise(sales = sum(Car.num)) %>%
+  ungroup()
+
+(figure2 <- ggplot(data_figure2, aes(x = year, y = sales, fill = origin_group)) +
+  geom_bar(position = "fill", stat = "identity") +
+  xlab("Years") +
+  ylab("Aggregate Sales (%)") +
+  ggtitle("Figure 2: Distribution of the country of origin by sales, 2018-2021"))
+```
+
+
+### BLP Estimation
+
+The following block creates the market sizes (by number of licensed drivers; estimated in 2021) and market shares, omitting cases of less than ten sales in the quarter and placing them in the outside option (note: they *were* taken into account in calculating the competitor-dependent IVs, as they are relevant to their rivals' considerations). Although the omitted models constitute around two thirds of our observations, we are still left with 7,619, and the omitted models account for only five percent of total sales in our sample. Outside option shares are calculated in the next block after some final trimming of the data.
+
+```{r}
+cars <- cars %>%
+  filter(Car.num > 9) %>%
+  mutate(
+    marketsize = case_when(year == 2018 ~ 4266307,
+                           year == 2019 ~ 4405446,
+                           year == 2020 ~ 4508457,
+                           year == 2021 ~ 4508457 * 1.01),
+    sj = Car.num / marketsize
+  )
+```
+
+
+Here we specify the model for BLP estimation, and create the `BLP_data` object based on it. The formula is split into four parts by `|` – linear variables, exogenous variables, random coefficients, and instruments.
+
+```{r}
+# Creating separate dummies for number of seats so that we can include a random coefficient only for the 6-9 category (reference category is seats = 5). Similarly separating hp_weight for hybrid/electric and fuel cars in order to give them random coefficients:
+cars <- cars %>%
+  mutate(
+    seats1 = as.numeric(Mispar.Moshavim < 5),
+    seats2 = as.numeric(Mispar.Moshavim > 5),
+    Intercept = 1     # required for the estimateBLP function
+  )
+
+# Taking only the variables that will be used and filtering out observations with missing data (required for `BLP_data`). Also deleting 4 observations which are the exact same model but have slight differences such that it is not clear whether these differences are documenting mistakes or not (required for the combination of market_id and product_id to be unique).
+productData <- cars %>%
+  select(year, quarter, sj, const_price, hp_weight, Koah.Sus, Kvutzat.Zihum, Nikud.Betihut, seats1, seats2, segment, Make.ENG, market_id, product_id, ExchangeRate, CustomsDuty, starts_with("compet_"), Intercept, growth, semel_yevuan) %>%
+  na.omit() %>%
+  group_by(market_id, product_id) %>%
+  mutate(n = n()) %>%
+  filter(n == 1) %>%
+  select(-n) %>%
+  ungroup() %>%
+  group_by(year, quarter) %>%   # Creating outside option share and initial guess for delta:
+  mutate(
+    s0 = 1 - sum(sj),
+    delta0 = log(sj)-log(s0)
+  ) %>%
+  ungroup()
+  
+
+# Formula
+model <- as.formula("sj ~ const_price + hp_weight + Kvutzat.Zihum + Nikud.Betihut + seats1 + seats2 + factor(segment) + factor(Make.ENG) + market_id |
+                    hp_weight + Kvutzat.Zihum + Nikud.Betihut + seats1 + seats2 + factor(segment) + factor(Make.ENG) + market_id |
+                    const_price + Kvutzat.Zihum + seats2 |
+                    ExchangeRate + ExchangeRate^2 + CustomsDuty + ExchangeRate*CustomsDuty + compet_num + compet_safety + compet_safety*ExchangeRate + compet_num*ExchangeRate + growth")
+
+BLPdata <- BLP_data(
+  model = model,
+  market_identifier = "market_id",
+  productData = productData,
+  product_identifier = "product_id",
+  par_delta = "delta0",
+  integration_method = "MLHS",
+  integration_accuracy = 1000,
+  blp_inner_tol = 1e-12,        # default = 1e-6
+  blp_inner_maxit = 5000,       # default
+  #integration_seed = 111        # for reproducibility
+)
+```
+
+
+Next we run a simple logit model with the purpose of using its standard errors, where relevant, as a starting guess for $\theta_2$ in the BLP estimation.
+
+```{r}
+logit_model <- feols(log(sj) - log(s0) ~ hp_weight + Kvutzat.Zihum + Nikud.Betihut + seats1 + seats2 + factor(segment) + factor(Make.ENG) + market_id | const_price ~ ExchangeRate + ExchangeRate^2 + CustomsDuty + ExchangeRate*CustomsDuty + compet_num + compet_safety + compet_safety*ExchangeRate + compet_num*ExchangeRate + growth, productData)
+
+theta2_guess <- as.matrix(logit_model$se[c(1,2,4,7)]) # including only variables with random coefficients
+
+# Renaming row and column names as required by the estimateBLP function
+rownames(theta2_guess)[2] <- "const_price"
+colnames(theta2_guess) <- "unobs_sd"
+
+# Changing the intercept's random coefficient to 0 (since we are less interested in it; generally this does not seem to affect the final estimates)
+theta2_guess[1,] <- 0
+```
+
+
+Finally, we can run the BLP estimation:
+
+```{r estimateBLP}
+start_time <- Sys.time()
+
+BLP <- estimateBLP(
+  blp_data = BLPdata,
+  par_theta2 = theta2_guess,
+  solver_method = "BFGS",
+  solver_maxit = 1000,   # default
+  solver_reltol = 1e-6,  # default
+  standardError = "heteroskedastic",
+  extremumCheck = FALSE,  # default is FALSE, might want to change
+  printLevel = 1
+)
+
+(runtime <- Sys.time() - start_time)
+#summary(BLP)
+```
+
+
+###
+
+The next step will be to backup marginal costs and markups:
+Using MSE $$ \dfrac{\partial s_j}{\partial p_j} = \dfrac{\partial \pi_j}{\partial p_j}$$
+simulate change to the integral given a marginal change in price
+
+
+
+**Trial 1: with brands**
+
+```{r}
+# Pre-FTA data
+# should think of which variable to use here. maybe add importer 
+own_pre <- productData %>%
+  select(Make.ENG) %>%
+  rename(brand = Make.ENG) %>%
+  dummy_cols(select_columns="brand") %>% select(-brand)
+colnames(own_pre) <- paste0("brand", 1:length(unique(productData$Make.ENG)))
+delta_pre <- BLP$delta
+theta1_price <- BLP$theta_lin["const_price",]
+theta2_price <- BLP$theta_rc["unobs_sd*const_price"]
+theta2_all <- matrix(BLP$theta_rc)
+rownames(theta2_all) <- rownames(theta2_guess)
+colnames(theta2_all) <- "unobs_sd"
+
+
+# Updating mean utility in data
+delta_data <- data.frame(
+  "product_id" = BLPdata$parameters$product_id,
+  "market_id" = BLPdata$parameters$market_id_char_in,
+  "delta" = delta_pre
+)
+BLPdata_updated <- update_BLP_data(
+  data_update = delta_data,
+  blp_data = BLPdata
+)
+
+
+# Calculating sij
+shareObj <- getShareInfo(
+  blp_data = BLPdata_updated,
+  par_theta2 = theta2_all,
+  printLevel = 0
+)
+
+# Computation of elasticities and marginal costs
+market_id <- BLPdata$parameters$market_id_char_in
+nmkt <- length(unique(market_id))
+markups <- numeric(length(market_id))
+sh <- shareObj$shares
+prices_pre <- BLPdata$data$X_rand[, "const_price"]
+
+for (i in 1:nmkt) {
+  mkt_ind <- market_id == i
+  share_i <- sh[mkt_ind]
+  price_pre_i <- prices_pre[mkt_ind]
+  scalar_i <- matrix(1 / share_i) %*% matrix(price_pre_i, nrow = 1)
+  elasticities_i <- get_elasticities(
+    blp_data = BLPdata_updated,
+    share_info = shareObj,
+    theta_lin = theta1_price,
+    variable = "const_price",
+    market = i,
+    printLevel = 0
+  )
+  derivatives_i <- elasticities_i / scalar_i # partial derivatives of shares wrt price
+  own_pre_i <- as.matrix(own_pre[mkt_ind,])
+  own_prod_pre_i <- own_pre_i %*% t(own_pre_i) # if element (i,j) equals 1, that means that prod i and j are produced by same firm
+  markups[mkt_ind] <- c(-solve(t(derivatives_i) * own_prod_pre_i) %*% share_i)
+}
+marg_cost <- prices_pre - markups
+
+
+```
+
+
+**Trial 2: with importers**
+
+```{r}
+# Pre-FTA data
+# should think of which variable to use here. maybe add importer 
+own_pre_yevuan <- productData %>%
+  select(semel_yevuan) %>%
+  dummy_cols(select_columns="semel_yevuan") %>% select(-semel_yevuan)
+colnames(own_pre_yevuan) <- paste0("yevuan", 1:length(unique(productData$Make.ENG)))
+
+markups_yevuan <- numeric(length(market_id))
+
+for (i in 1:nmkt) {
+  mkt_ind <- market_id == i
+  share_i <- sh[mkt_ind]
+  price_pre_i <- prices_pre[mkt_ind]
+  scalar_i <- matrix(1 / share_i) %*% matrix(price_pre_i, nrow = 1)
+  elasticities_i <- get_elasticities(
+    blp_data = BLPdata_updated,
+    share_info = shareObj,
+    theta_lin = theta1_price,
+    variable = "const_price",
+    market = i,
+    printLevel = 0
+  )
+  derivatives_i <- elasticities_i / scalar_i # partial derivatives of shares wrt price
+  own_pre_i <- as.matrix(own_pre_yevuan[mkt_ind,])
+  own_prod_pre_i <- own_pre_i %*% t(own_pre_i) # if element (i,j) equals 1, that means that prod i and j are produced by same firm
+  markups_yevuan[mkt_ind] <- c(-solve(t(derivatives_i) * own_prod_pre_i) %*% share_i)
+}
+marg_cost_yevuan <- prices_pre - markups_yevuan
+
+
+```
+
+
+```{r}
+print(c(mean(marg_cost), mean(marg_cost_yevuan), cor(marg_cost, marg_cost_yevuan)))
+cbind(marg_cost, marg_cost_yevuan, marg_cost - marg_cost_yevuan)
+```
+
+
+(FOR OWN REFERENCE)
+
+```{r}
+#temp <- cars %>% group_by(Car.num) %>% summarise(n = n()) %>% mutate(grouptotal = Car.num * n, cdf_obs = cumsum(n) / sum(n), cdf_sales = cumsum(grouptotal) / sum(grouptotal))
+```
+
