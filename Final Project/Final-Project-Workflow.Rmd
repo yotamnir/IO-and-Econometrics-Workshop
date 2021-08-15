@@ -36,7 +36,8 @@ pacman::p_load(
   BLPestimatoR,  # for BLP estimation
   Rcpp,          # required for BLPestimatoR
   fastDummies,   # for conveniently turning categorical variables into dummies
-  nleqslv
+  nleqslv,       # for solving non-linear FOCs
+  ddpcr          # used here for the 'quiet' function
 )
 
 # Function for table formatting (credit to Alon Rashty)
@@ -160,7 +161,7 @@ cars <- merge(cars,long) %>%
                             year == 2020 ~ mehir/1075.4,
                             year == 2021 ~ mehir/1081.515)
   ) %>%
-  filter(const_price < 750)
+  filter(const_price < 750) # remove very expensive cars, to focus on the main car market
 ```
 
 
@@ -178,7 +179,7 @@ cars <- cars %>%
 ```
 
 
-Another variable we will use as an instrument is GDP growth, reflecting the economic conditions in the country of origin at the time of production. Data retrieved from [World Bank](https://data.worldbank.org/indicator/NY.GDP.MKTP.KD.ZG?end=2020&locations=AT-BE-CA-CN-CZ-FR-HU-DE-IN-IT-JP-MX-MA-NL-PL-PT-RO-RS-SK-SI-ZA-KR-ES-SE-TH-TR-GB-US&start=2016&view=chart), [OECD data](https://data.oecd.org/gdp/quarterly-gdp.htm) and some missing countries were added manually (Morocco, Thailand and Serbia in the first quarter of 2021).
+Another variable we will use as an instrument is GDP growth, reflecting the economic conditions in the country of origin at the time of production. Data retrieved from [World Bank](https://data.worldbank.org/indicator/NY.GDP.MKTP.KD.ZG?end=2020&locations=AT-BE-CA-CN-CZ-FR-HU-DE-IN-IT-JP-MX-MA-NL-PL-PT-RO-RS-SK-SI-ZA-KR-ES-SE-TH-TR-GB-US&start=2016&view=chart), [OECD data](https://data.oecd.org/gdp/quarterly-gdp.htm) and some missing countries were added manually ([Morocco](https://www.mapnews.ma/en/actualites/economy/morocco-economic-growth-1-q1-2021-hcp), [Thailand](https://tradingeconomics.com/thailand/gdp-growth) and [Serbia](https://tradingeconomics.com/serbia/gdp-growth-annual) in the first quarter of 2021).
 
 ```{r}
 growth <- read.csv("GDPgrowth.csv") %>% 
@@ -219,7 +220,6 @@ cars <- merge(cars,long)
 ##### Random coefficients
 
 * `const_price`
-* `hp_weight`
 * `Kvutzat.Zihum`
 * `seats2` – category of cars with 6-9 seats
 
@@ -271,7 +271,7 @@ cars <- cars %>%
 
 ### BLP Estimation
 
-The following block creates the market sizes (by number of licensed drivers; estimated in 2021) and market shares, omitting cases of less than ten sales in the quarter and placing them in the outside option (note: they *were* taken into account in calculating the competitor-dependent IVs, as they are relevant to their rivals' considerations). Although the omitted models constitute around two thirds of our observations, we are still left with 7,619, and the omitted models account for only five percent of total sales in our sample. Outside option shares are calculated in the next block after some final trimming of the data.
+The following block creates the market sizes (by number of licensed drivers; estimated in 2021) and market shares, omitting cases of less than ten sales in the quarter and placing them in the outside option (note: they *were* taken into account in calculating the competitor-dependent IVs, as they are relevant to their rivals' considerations). Although the omitted models constitute around two thirds of our observations, we are still left with 6,788, and the omitted models account for only five percent of total sales in our sample. Outside option shares are calculated in the next block after some final trimming of the data.
 
 ```{r}
 productData <- cars %>%
@@ -369,19 +369,17 @@ BLP <- estimateBLP(
 )
 
 (runtime <- Sys.time() - start_time)
-#summary(BLP)
+summary(BLP)
 ```
 
 
 ### Backing Out Markups and Marginal Costs
 
-The next step will be to backup marginal costs and markups:
-Using MSE $$ \dfrac{\partial s_j}{\partial p_j} = \dfrac{\partial \pi_j}{\partial p_j}$$
-simulate change to the integral given a marginal change in price
+The next step will be to backup marginal costs and markups, using the MSE – $ \dfrac{\partial s_j}{\partial p_j} = \dfrac{\partial \pi_j}{\partial p_j}$ – to simulate the change to the integral given a marginal change in price.
 
 
 
-#### Trial 1: with brands
+#### Trial 1: brands as producers
 
 ```{r}
 # Pre-FTA data
@@ -446,7 +444,7 @@ mc_pre <- prices_pre - markups
 ```
 
 
-#### Trial 2: with importers
+#### Trial 2: importers as producers
 
 ```{r}
 # Pre-FTA data
@@ -575,7 +573,7 @@ Now we solve the equation for each of the markets:
 ```{r, message=FALSE, warning=FALSE, comment=FALSE, results='hide'}
 prices_post <- prices_pre
 runtime2 <- c(1:nmkt) # (for own reference)
-for (i in 1:nmkt) {
+quiet(for (i in 1:nmkt) {
   start_time2 <- Sys.time()
   mkt_ind <- market_id == i
   price_pre_i <- prices_pre[mkt_ind]
@@ -590,7 +588,7 @@ for (i in 1:nmkt) {
 
   prices_post[market_id == i] <- solution$x
   runtime2[i] <- Sys.time() - start_time2
-}
+})
 ```
 
 
@@ -711,23 +709,10 @@ sum(shares_post[!Korea_ind]) / sum(shares_pre[!Korea_ind])
 ```
 
 
+### Summary Statistics Figures and Tables
 
-
-
-
-
-
-### (FOR OWN REFERENCE)
-
-Organizing the various data objects into a single tibble:
-
-```{r}
-# Auxiliary object to create the post-FTA marginal costs
-mc_diff <- c(rep(0, 6788))
-mc_diff[BLPdata$data$additional_data[,3] == "South Korea"] <- 
-  prices_pre[BLPdata$data$additional_data[,3] == "South Korea"] * 7/107
-
-# The new data tibble
+``` {r, message=FALSE}
+# Auxiliary data frame of the old and new equilibrium data
 newdata <- tibble(
   Korea_ind = BLPdata$data$additional_data[,3] == "South Korea",
   market_id = BLPdata$parameters$market_id_char_in,
@@ -743,73 +728,7 @@ newdata <- tibble(
   shares_post,
   diff = shares_post - shares_pre    # Difference between old and new market shares
 )
-```
 
-
-
-Trial with lower prices:
-
-```{r}
-temp_prices <- prices_post
-temp_prices[newdata$Korea_ind == TRUE] <- prices_post[newdata$Korea_ind == TRUE]
-
-# Updating mean utility in data
-temp_delta_data <- data.frame(
-  product_id = BLPdata$parameters$product_id,
-  market_id = BLPdata$parameters$market_id_char_in,
-  delta = shareObj$shares,
-  const_price = temp_prices
-)
-
-# Updating BLP_data object to new data
-temp_BLPdata <- update_BLP_data(
-  data_update = temp_delta_data,
-  blp_data = BLPdata_updated
-)
-
-# Adjusting the relevant information inside final_BLPdata
-temp_BLPdata$data$X_rand[,2] <- temp_BLPdata$data$X_lin[,2]
-
-# Calculating sij
-temp_shareObj <- getShareInfo(
-  blp_data = temp_BLPdata,
-  par_theta2 = temp_theta2_all,
-  printLevel = 0
-)
-
-```
-
-
-
-```{r}
-c(
-  mean(mc_pre),
-  mean(mc_pre_yevuan),
-  median(mc_pre),
-  median(mc_pre_yevuan),
-  cor(mc_pre, mc_pre_yevuan)
-)
-c(
-  sum(mc_pre > 0),
-  sum(mc_pre_yevuan > 0),
-  sum(mc_pre <= 0),
-  sum(mc_pre_yevuan <= 0)
-)
-view(cbind(prices_pre, mc_pre, mc_pre_yevuan, mc_pre - mc_pre_yevuan))
-```
-
-
-```{r}
-#temp <- cars %>% group_by(Car.num) %>% summarise(n = n()) %>% mutate(grouptotal = Car.num * n, cdf_obs = cumsum(n) / sum(n), cdf_sales = cumsum(grouptotal) / sum(grouptotal))
-```
-
-
-
-### Summary Statistics
-
-Before subsetting the sample and running the estimation, the following code creates Figure 1 and Figure 2 in our paper:
-
-``` {r, message=FALSE}
 
 # Figure 1: Distribution of Country.of.Origin each - should we pick some aggregated brand variable instead?
 europe <- unique(cars$Country.of.Origin)
@@ -863,22 +782,50 @@ table1 <- productData %>%
   sapply(summary) %>%
   as.matrix()
 colnames(table1) <- c("Share (%)", "Price (2010 NIS)", "Horsepower/Weight", "Pollution Index", "Safety Index", "Models in segment")
+
 table1 %>% kable_format(digits = c(4, 3, 3, 1, 1, 1))
 
 
-# Table 2: Regression Outputs – simple logit 1st and 2nd stages, and RCL
+# Table 2: Regression Outputs – simple logit 1st and 2nd stages
+firststage <- logit_model$iv_first_stage$const_price$coeftable[2:11,1:3]
+rownames(firststage) <- c("ExchangeRate","ExchangeRate^2","CustomsDuty",
+                          "Number of Competitors","Competitors' Safety Index",
+                          "Competitors' HP","ExchangeRate*CustomsDuty",
+                          "ExchangeRate*compet_safety","ExchangeRate*compet_num",
+                          "ExchangeRate*compet_hp")
+colnames(firststage) <- c("Coef.","Std. Error","T-value")
+firststage %>% kable_format(digits = c(1, 1, 1),caption = "First Stage (Instruments Only)")
+
+secondstage <- logit_model$coeftable[c(1:7, length(logit_model$coefficients)),1:3]
+rownames(secondstage) <- c("Intercept","Price","HP/weight","Pollution Index",
+                           "Safety Index","Less than 5 seats","More than 5 seats", "Time-trend")
+colnames(secondstage) <- c("Coef.","Std. Error","T-value")
+secondstage %>% kable_format(digits = c(3, 3, 1),caption = "Second Stage")
 
 
+# Table 3: RCL results
+linear <- cbind(BLP$theta_lin[c(1:7, length(BLP$theta_lin)), 1], BLP$se_linear[c(1:7, length(BLP$se_linear))], BLP$theta_lin[c(1:7, length(BLP$theta_lin)), 1] / BLP$se_linear[c(1:7, length(BLP$se_linear))])
+rownames(linear) <- c("Intercept","Price","HP/weight","Pollution Index",
+                      "Safety Index","Less than 5 seats","More than 5 seats",
+                      "Time-trend")
+colnames(linear) <- c("Coef.","Std. Error","T-value")
+linear %>% kable_format(digits = c(3, 3, 2),caption = "Linear Coefficients")
+
+rc <- cbind(BLP$theta_rc,BLP$se_rc,BLP$theta_rc/BLP$se_rc)
+rownames(rc) <- c("Intercept","Price","Pollution Index","More than 5 seats")
+colnames(rc) <- c("Coef.","Std. Error","T-value")
+rc %>% kable_format(digits = c(3, 3, 2),caption = "Random Coefficients")
 
 
-
-# Table 3: Elasticities
+# Table 4: Elasticities
 table_elasticities <- elasticities_i[c("9001","10173","10245","10133","9962","9938","10178"), c("9001","10173","10245","10133","9962","9938","10178")]
 rownames(table_elasticities) <- c("Hyundai Ioniq Hybrid", "Hyundai i20", "Kia Picanto", "Toyota Corolla HSD SDN", "Seat Arona", "Renault Megane", "Hyundai i10")
 colnames(table_elasticities) <- c("Hyundai Ioniq Hybrid", "Hyundai i20", "Kia Picanto", "Toyota Corolla HSD SDN", "Seat Arona", "Renault Megane", "Hyundai i10")
 
+table_elasticities %>% kable_format()
 
-# Table 4: Prices, MCs, markups, for the 6 models
+
+# Table 5: Prices, MCs, markups, for the 7 models
 table_mc_markup <- as.matrix(newdata %>% filter(product_id %in% c(9001,10173,10245,10133,9962,9938,10178)) %>%                         select(prices_pre,mc_pre,markups_pre,prices_post,mc_post,markups_post) %>%
                              mutate(ms_pre = markups_pre/prices_pre, 
                                     ms_post = markups_post/prices_post,
@@ -888,10 +835,9 @@ colnames(table_mc_markup) <- c("Price", "MC", "Markup", "FTA Price", "FTA MC", "
 
 table_mc_markup %>% kable_format(digits = c(0, 0, 0, 0, 0, 0, 2, 2, 2))
 
-prices_pre[BLPdata$parameters$product_id == 10245]
 
-# Table 5:
-table5 <- newdata %>%
+# Table 6: Aggregate market changes for Korean and non-Korean cars
+table6 <- newdata %>%
   group_by(Korea_ind) %>%
   summarise(
     mean_price_change = mean(100 * (prices_post / prices_pre - 1)),
@@ -904,7 +850,18 @@ table5 <- newdata %>%
     sd_share_change = sd(100 * (shares_post / shares_pre - 1))
   ) %>%
   t()
-
+table6_overallcolumn <- newdata %>%
+    summarise(
+        mean_price_change = mean(100 * (prices_post / prices_pre - 1)),
+        sd_prices_change = sd(100 * (prices_post / prices_pre - 1)),
+        mean_mc_change = mean(100 * (mc_post / mc_pre - 1)),
+        sd_mc_change = sd(100 * (mc_post / mc_pre - 1)),
+        mean_markup_change = mean(100 * (markups_post / markups_pre - 1)),
+        sd_markup_change = sd(100 * (markups_post / markups_pre - 1)),
+        mean_share_change = mean(100 * (shares_post / shares_pre - 1)),
+        sd_share_change = sd(100 * (shares_post / shares_pre - 1))
+    ) %>%
+    t()
 
 ```
 
