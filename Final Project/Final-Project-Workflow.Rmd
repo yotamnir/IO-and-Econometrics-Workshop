@@ -713,6 +713,10 @@ sum(shares_post[!Korea_ind]) / sum(shares_pre[!Korea_ind])
 
 ``` {r, message=FALSE}
 # Auxiliary data frame of the old and new equilibrium data
+mc_diff <- c(rep(0, 6788))
+mc_diff[BLPdata$data$additional_data[,3] == "South Korea"] <- 
+  prices_pre[BLPdata$data$additional_data[,3] == "South Korea"] * 7/107
+
 newdata <- tibble(
   Korea_ind = BLPdata$data$additional_data[,3] == "South Korea",
   market_id = BLPdata$parameters$market_id_char_in,
