@@ -9,7 +9,7 @@ contraction_mapping2 <- function(sigma){
   
   mu <- as.matrix(ungroup(cars) %>% select(princ, li)) %*% t(sigmanu)
   
-  # exponent of delta + nu from each product for each consumer
+  # exponent of delta + mu from each product for each consumer
   cars$delta <- log(cars$sj) - log(cars$s0)
   exp_ji <- exp(cars$delta + mu)
   
