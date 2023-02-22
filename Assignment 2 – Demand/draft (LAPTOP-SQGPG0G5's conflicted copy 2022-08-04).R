@@ -2,6 +2,8 @@
 sigma <- IV$se[c(2,5)]
 
 contraction_mapping2 <- function(sigma){
+  iter = 0
+  
   sigmanu <- cbind(
     nu[,1] * sigma[1],
     nu[,2] * sigma[2]
@@ -52,6 +54,9 @@ contraction_mapping2 <- function(sigma){
         across(.cols = V1:V1000, ~ sum(.x) + 1)
       )
     pi_delta <- rowMeans(exp_ji / market_denoms[3:1002])
+    iter = iter + 1
+    
+    print(paste(iter, ": ", dist))
   }
   
   delta <- cars$delta
