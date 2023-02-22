@@ -54,7 +54,7 @@ rm(temp)
 
 ## 2. Returns to schooling: point-identified linear models
 
-The following linear regression model is largely similar to Card's fourth specification in Table 4, minus a few controls and with the addition of two variables aiming to minimize the "ability bias" of OLS. It can be used to attempt estimate the effect of education (in particular, the number of years of schooling in 1976) on log wages in 1976:
+The following linear regression model is largely similar to Card's fourth specification in Table 4, minus a few controls and with the addition of two variables aiming to minimize the "ability bias" of OLS. It can be used to attempt to estimate the effect of education (in particular, the number of years of schooling in 1976) on log wages in 1976:
 
 $log(wages76_i) = \alpha_r + \beta educ76_i + \gamma X_i$
 
@@ -62,11 +62,11 @@ where $\alpha_r$ is a vector of controls for region of residence in 1966 and $X_
 
 * IQ and knowledge of the world of work scores, serving as proxies for "ability" (the latter score does not seem to be a good indicator of intelligence, but it may be a good proxy for motivation, since it is reasonable to assume that individuals with a higher KWW score take more interest in the world of work).
 * Experience and experience squared, to capture the diminishing returns to experience as is customary in Mincer equations.
-* Mother's years of schooling and father's years of schooling, living with a single mother at age 14, as background controls which may affect both years of schooling and worker qualities.
+* Mother's years of schooling and father's years of schooling, and living with a single mother at age 14, as background controls which may affect both years of schooling and worker qualities.
 * Ethnicity (whether black) as an additional control for background and for potential labor market discrimination.
 * Current residence in the south or in a metropolitan area (SMSA) to control for labor market characteristics.
 
-The following code estimates the above equation in OLS (weighted according to NLS weights):
+The following block estimates the above equation in OLS (weighted according to NLS weights):
 
 ```{r OLS}
 OLS <- lm(lwage76 ~ ed76 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black +smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668, NLS, weights = weight)
@@ -77,7 +77,7 @@ The effect of around 0.059 per year obtained here is lower than that found by Ca
 
 In order to overcome ability bias (as well as measurement error bias, which tends to bias estimates toward zero), we could use an instrumental variable that is correlated with schooling choices, but which we can reasonably believe is uncorrelated with the source of bias – i.e. with ability (and the measurement error, although this is less challenging, even if worthy of attention).
 
-None of the variables available in the NLS data set seem as plausibly exogenous as Card's choice of proximity to a four-year college while growing up. Card shows that it is correlated with schooling, and the t-statistic on *nearc4* in the first-stage regression presented below indicates a sufficient correlation with years of schooling.
+None of the variables available in the NLS data set seem as plausibly exogenous as Card's choice of proximity to a four-year college while growing up (which, as discussed below, is of course also imperfect). Card shows that it is correlated with schooling, and the t-statistic on `nearc4` in the first-stage regression presented below indicates a sufficient correlation with years of schooling.
 
 ```{r Relevance Condition}
 first_stage <- lm(ed76 ~ nearc4 + exper + exper2 + KWW + IQ + daded + momed + sinmom14 + black +smsa76 + south76 + reg661 + reg662 + reg663 + reg664 + reg665 + reg666 + reg667 + reg668, NLS)
@@ -102,7 +102,7 @@ A potential shortcoming of this model is that growing up near a four-year colleg
 
 As mentioned above, it is not unlikely that the college proximity instrument fails to satisfy the exclusion restriction. It might, however, be more plausible to argue that wages conditional on any level of education are affected non-negatively, in expectation, by growing up near a four-year college. Spillovers such as those suggested above, or increased economic activity associated with the presence of a college, support such an assumption. This monotone IV assumption allows us to estimate bounds on the average treatment effect of the variable for which we are instrumenting. We can then narrow these bounds by adding a monotone treatment selection (MTS) assumption. The MTS implies that those in the higher educated group would in expectation have higher wages even if both groups had obtained exactly the same level of education (unconditional on the particular level). The ability bias discussed above does indeed support such an assumption.
 
-To this end, I replace the continuous years of schooling variable with a binary variable, due to my unfamiliarity with any continuous equivalent of an ATE in this context. The variable used here is post-high school education, which receives a value of 1 for individuals with $ed76 > 12$, and 0 otherwise. I prefer this choice for two reasons. The first is with respect to lower cutoffs: growing up near a college is likely to be most influential on years of schooling particularly through its effect on college attendance (although it could potentially also affect other schooling outcomes through a spillover to school quality). The second, which is perhaps more debatable is with respect to the definition of the college treatment: the available data does not allow me to accurately identify college graduates, and also there is value in observing individuals who have enjoyed some higher education even if they did not receive a diploma.
+To this end, I replace the continuous years of schooling variable with a binary variable, due to my unfamiliarity with any continuous equivalent of an ATE in this context. The variable used here is post-high school education, which receives a value of 1 for individuals with $ed76 > 12$, and 0 otherwise. I prefer this choice for two reasons. The first is with respect to lower cutoffs: growing up near a college is likely to be most influential on years of schooling particularly through its effect on college attendance (although it could potentially also affect other schooling outcomes through a spillover to school quality). The second, which is perhaps more debatable, is with respect to the definition of the college treatment: the definition here is chosen because the available data does not allow me to accurately identify college graduates, and, furthermore, there is some value in observing individuals who have enjoyed some higher education even if they did not receive a diploma.
 
 #### MIV
 
@@ -218,7 +218,7 @@ miv(
 )
 ```
 
-If we accept the validity of these MIVs, we can conclude on the basis of relatively few assumptions that going to college (an admittedly ambiguous treatment, though informative nonetheless) improves earnings by no more than 50 percent.
+If we accept the validity of these MIVs, we can conclude on the basis of relatively weak assumptions that going to college (an admittedly ambiguous treatment, though informative nonetheless) improves earnings by no more than 50 percent.
 
 #### MTS
 
